@@ -59,7 +59,7 @@
 
                 var result = channel.BasicGet(ErrorQueue, true);
 
-                Assert.False(messageWasReceived, "Message should not be processed processed successfully.");
+                Assert.False(messageWasReceived, "Message should not be processed successfully.");
                 Assert.NotNull(result, "Message should be considered poison and moved to the error queue.");
             }
         }
