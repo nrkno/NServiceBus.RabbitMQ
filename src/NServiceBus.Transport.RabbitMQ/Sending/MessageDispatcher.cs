@@ -26,12 +26,14 @@
 
                 foreach (var operation in unicastTransportOperations)
                 {
-                    tasks.Add(SendMessage(operation, channel));
+                    context.TryGet(out RabbitMQMessagePriority priority);
+                    tasks.Add(SendMessage(operation, channel, priority));
                 }
 
                 foreach (var operation in multicastTransportOperations)
                 {
-                    tasks.Add(PublishMessage(operation, channel));
+                    context.TryGet(out RabbitMQMessagePriority priority);
+                    tasks.Add(PublishMessage(operation, channel, priority));
                 }
 
                 channelProvider.ReturnPublishChannel(channel);
@@ -45,23 +47,29 @@
             }
         }
 
-        Task SendMessage(UnicastTransportOperation transportOperation, ConfirmsAwareChannel channel)
+        Task SendMessage(UnicastTransportOperation transportOperation, ConfirmsAwareChannel channel, RabbitMQMessagePriority priority)
         {
             var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
             properties.Fill(message, transportOperation.DeliveryConstraints, out var destination);
-
+            if (priority != null)
+            {
+                properties.Priority = priority.Priority;
+            }
             return channel.SendMessage(destination ?? transportOperation.Destination, message, properties);
         }
 
-        Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel)
+        Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel, RabbitMQMessagePriority priority)
         {
             var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
             properties.Fill(message, transportOperation.DeliveryConstraints, out _);
-
+            if (priority != null)
+            {
+                properties.Priority = priority.Priority;
+            }
             return channel.PublishMessage(transportOperation.MessageType, message, properties);
         }
     }

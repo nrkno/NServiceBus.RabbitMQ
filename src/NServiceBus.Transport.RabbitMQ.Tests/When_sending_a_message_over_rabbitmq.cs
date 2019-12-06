@@ -93,14 +93,43 @@
                     Assert.AreEqual("v2", result.Headers["h2"]);
                 });
         }
+        
+        [Test]
+        public Task Should_transmit_rabbitmq_message_priority()
+        {
+            const byte priority = 1;
+            var contextBag = GetContextWithRabbitMqPriority(priority);
+            return Verify(new OutgoingMessageBuilder(), contextBag, result => Assert.AreEqual(priority, result.BasicProperties.Priority));
+        }
+
+        [Test]
+        public Task Should_transmit_default_message_priority()
+        {
+            return Verify(new OutgoingMessageBuilder(), result => Assert.AreEqual(0, result.BasicProperties.Priority));
+        }
+        
+        [Test]
+        public Task Should_not_fail_with_out_of_range_rabbitmq_message_priority()
+        {
+            const byte outOfRangePriority = 255;
+            var contextBag = GetContextWithRabbitMqPriority(outOfRangePriority);
+            return Verify(new OutgoingMessageBuilder(), contextBag, result => Assert.AreEqual(outOfRangePriority, result.BasicProperties.Priority));
+        }
+
+        static ContextBag GetContextWithRabbitMqPriority(byte priority)
+        {
+            var contextBag = new ContextBag();
+            contextBag.Set(new RabbitMQMessagePriority(priority));
+            return contextBag;
+        }
 
         protected override IEnumerable<string> AdditionalReceiverQueues => new[] { queueToReceiveOn };
 
-        async Task Verify(OutgoingMessageBuilder builder, Action<IncomingMessage, BasicDeliverEventArgs> assertion)
+        async Task Verify(OutgoingMessageBuilder builder, Action<IncomingMessage, BasicDeliverEventArgs> assertion, ContextBag contextBag = null)
         {
             var operations = builder.SendTo(queueToReceiveOn).Build();
 
-            await messageDispatcher.Dispatch(operations, new TransportTransaction(), new ContextBag());
+            await messageDispatcher.Dispatch(operations, new TransportTransaction(), contextBag ?? new ContextBag());
 
             var messageId = operations.MulticastTransportOperations.FirstOrDefault()?.Message.MessageId ?? operations.UnicastTransportOperations.FirstOrDefault()?.Message.MessageId;
 
@@ -114,10 +143,12 @@
 
             assertion(incomingMessage, result);
         }
-
+        
         Task Verify(OutgoingMessageBuilder builder, Action<IncomingMessage> assertion) => Verify(builder, (t, r) => assertion(t));
 
         Task Verify(OutgoingMessageBuilder builder, Action<BasicDeliverEventArgs> assertion) => Verify(builder, (t, r) => assertion(r));
+        
+        Task Verify(OutgoingMessageBuilder builder, ContextBag contextBag, Action<BasicDeliverEventArgs> assertion) => Verify(builder, (t, r) => assertion(r), contextBag);
 
         BasicDeliverEventArgs Consume(string id, string queueToReceiveOn)
         {

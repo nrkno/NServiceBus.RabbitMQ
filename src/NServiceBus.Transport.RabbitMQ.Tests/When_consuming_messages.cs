@@ -63,6 +63,29 @@
                 Assert.NotNull(result, "Message should be considered poison and moved to the error queue.");
             }
         }
+        
+        [Test]
+        public void Should_keep_rabbitmq_priority_when_moving_to_error_queue()
+        {
+            var message = new OutgoingMessage(Guid.NewGuid().ToString(), new Dictionary<string, string>(), new byte[0]);
+
+            using (var connection = connectionFactory.CreatePublishConnection())
+            using (var channel = connection.CreateModel())
+            {
+                var properties = channel.CreateBasicProperties();
+                properties.Priority = 1;
+                
+                channel.BasicPublish(string.Empty, ReceiverQueue, false, properties, message.Body);
+
+                var messageWasReceived = TryWaitForMessageReceipt();
+
+                var result = channel.BasicGet(ErrorQueue, true);
+
+                Assert.False(messageWasReceived, "Message should not be processed successfully.");
+                Assert.NotNull(result, "Message should be considered poison and moved to the error queue.");
+                Assert.AreEqual(1, result.BasicProperties.Priority, "Should keep priority when moving to error queue");
+            }
+        }
 
         [Test]
         public void Should_up_convert_the_native_type_to_the_enclosed_message_types_header_if_empty()

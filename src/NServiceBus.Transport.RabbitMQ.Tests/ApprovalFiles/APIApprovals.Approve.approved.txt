@@ -50,4 +50,9 @@ namespace NServiceBus.Transport.RabbitMQ
         void SetupSubscription(RabbitMQ.Client.IModel channel, System.Type type, string subscriberName);
         void TeardownSubscription(RabbitMQ.Client.IModel channel, System.Type type, string subscriberName);
     }
+    public class RabbitMQMessagePriority
+    {
+        public RabbitMQMessagePriority(byte priority) { }
+        public byte Priority { get; }
+    }
 }
