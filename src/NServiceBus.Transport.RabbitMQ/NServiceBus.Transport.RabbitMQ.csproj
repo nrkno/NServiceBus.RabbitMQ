@@ -20,4 +20,8 @@
     <Description>RabbitMQ support for NServiceBus</Description>
   </PropertyGroup>
 
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <NoWarn>;NU5125;NU5048</NoWarn>
+  </PropertyGroup>
+
 </Project>
