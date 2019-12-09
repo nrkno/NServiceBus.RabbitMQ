@@ -24,10 +24,12 @@
     class ConventionalRoutingTopology : IRoutingTopology
     {
         readonly bool useDurableExchanges;
+        readonly byte maxPriority;
 
-        public ConventionalRoutingTopology(bool useDurableExchanges)
+        public ConventionalRoutingTopology(bool useDurableExchanges, byte maxPriority = 0)
         {
             this.useDurableExchanges = useDurableExchanges;
+            this.maxPriority = maxPriority;
         }
 
         public void SetupSubscription(IModel channel, Type type, string subscriberName)
@@ -74,9 +76,15 @@
 
         public void Initialize(IModel channel, IEnumerable<string> receivingAddresses, IEnumerable<string> sendingAddresses)
         {
-            foreach (var address in receivingAddresses.Concat(sendingAddresses))
+            var receiving = receivingAddresses as string[] ?? receivingAddresses.ToArray();
+            foreach (var address in receiving.Concat(sendingAddresses))
             {
-                channel.QueueDeclare(address, useDurableExchanges, false, false, null);
+                Dictionary<string, object> arguments = null;
+                if (maxPriority > 0 && receiving.Contains(address))
+                {
+                    arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };                    
+                }
+                channel.QueueDeclare(address, useDurableExchanges, false, false, arguments);
                 CreateExchange(channel, address);
                 channel.QueueBind(address, address, string.Empty);
             }

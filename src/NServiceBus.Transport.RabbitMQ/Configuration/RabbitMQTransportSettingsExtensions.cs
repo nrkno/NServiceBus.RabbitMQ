@@ -30,6 +30,15 @@
             transportExtensions.UseRoutingTopology(durable => new ConventionalRoutingTopology(durable));
 
         /// <summary>
+        /// Uses the conventional routing topology, where receiving queues support priority.
+        /// </summary>
+        /// <param name="transportExtensions"></param>
+        /// <param name="maxPriority">Max priority on queue. 0 - 9</param>
+        public static TransportExtensions<RabbitMQTransport> UseConventionalRoutingTopologyWithPriority(this TransportExtensions<RabbitMQTransport> transportExtensions, byte maxPriority) =>
+            transportExtensions.UseRoutingTopology(durable => new ConventionalRoutingTopology(durable, maxPriority));
+
+        
+        /// <summary>
         /// Uses the direct routing topology with the specified conventions.
         /// </summary>
         /// <param name="transportExtensions"></param>
