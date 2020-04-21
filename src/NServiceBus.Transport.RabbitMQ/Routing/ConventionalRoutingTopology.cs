@@ -79,12 +79,15 @@
             var receiving = receivingAddresses as string[] ?? receivingAddresses.ToArray();
             foreach (var address in receiving.Concat(sendingAddresses))
             {
-                Dictionary<string, object> arguments = null;
                 if (maxPriority > 0 && receiving.Contains(address))
                 {
-                    arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };                    
+                    var arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };
+                    channel.QueueDeclare(address + $".Priority{maxPriority}", useDurableExchanges, false, false, arguments);
                 }
-                channel.QueueDeclare(address, useDurableExchanges, false, false, arguments);
+                else
+                {
+                    channel.QueueDeclare(address, useDurableExchanges, false, false);
+                }
                 CreateExchange(channel, address);
                 channel.QueueBind(address, address, string.Empty);
             }
