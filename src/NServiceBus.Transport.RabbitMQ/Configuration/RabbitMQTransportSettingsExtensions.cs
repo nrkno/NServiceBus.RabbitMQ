@@ -34,7 +34,7 @@
         /// </summary>
         /// <param name="transportExtensions"></param>
         /// <param name="maxPriority">Max priority on queue. 0 - 9</param>
-        public static TransportExtensions<RabbitMQTransport> UseConventionalRoutingTopologyWithPriority(this TransportExtensions<RabbitMQTransport> transportExtensions, byte maxPriority) =>
+        public static TransportExtensions<RabbitMQTransport> UseConventionalRoutingTopologyWithPriority(this TransportExtensions<RabbitMQTransport> transportExtensions, int maxPriority) =>
             transportExtensions.UseRoutingTopology(durable => new ConventionalRoutingTopology(durable, maxPriority));
 
         

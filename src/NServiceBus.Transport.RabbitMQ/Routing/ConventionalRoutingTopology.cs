@@ -24,9 +24,9 @@
     class ConventionalRoutingTopology : IRoutingTopology
     {
         readonly bool useDurableExchanges;
-        readonly byte maxPriority;
+        readonly int maxPriority;
 
-        public ConventionalRoutingTopology(bool useDurableExchanges, byte maxPriority = 0)
+        public ConventionalRoutingTopology(bool useDurableExchanges, int maxPriority = 0)
         {
             this.useDurableExchanges = useDurableExchanges;
             this.maxPriority = maxPriority;
