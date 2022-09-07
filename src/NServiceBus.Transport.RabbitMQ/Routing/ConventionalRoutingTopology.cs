@@ -79,26 +79,30 @@
 
         public void Initialize(IModel channel, IEnumerable<string> receivingAddresses, IEnumerable<string> sendingAddresses)
         {
-            Dictionary<string, object> arguments;
+            Dictionary<string, object> arguments = null;
             var createDurableQueue = durable;
 
             if (queueType == QueueType.Quorum)
             {
                 arguments = new Dictionary<string, object> { { "x-queue-type", "quorum" } };
-
                 if (createDurableQueue == false)
                 {
                     createDurableQueue = true;
                     Logger.Warn("Quorum queues are always durable, so the non-durable setting is being ignored for queue declaration.");
                 }
             }
-            else
-            {
-                arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };
-            }
 
-            foreach (var address in receivingAddresses.Concat(sendingAddresses))
+            var receiving = receivingAddresses.ToList();
+            foreach (var address in receiving.Concat(sendingAddresses))
             {
+                if (queueType == QueueType.Classic && maxPriority > 0 && receiving.Contains(address))
+                {
+                    arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };
+                }
+                else if (queueType != QueueType.Quorum)
+                {
+                    arguments = null;
+                }
                 channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
                 CreateExchange(channel, address);
                 channel.QueueBind(address, address, string.Empty);
