@@ -24,7 +24,7 @@
             public Receiver()
             {
                 EndpointSetup<DefaultServer>(c => c.UseTransport<RabbitMQTransport>()
-                    .UseDirectRoutingTopology());
+                    .UseDirectRoutingTopology(QueueType.Classic));
             }
 
             class MyEventHandler : IHandleMessages<MyRequest>
@@ -40,7 +40,7 @@
                 {
                     myContext.GotTheMessage = true;
 
-                    return TaskEx.CompletedTask;
+                    return Task.CompletedTask;
                 }
             }
         }

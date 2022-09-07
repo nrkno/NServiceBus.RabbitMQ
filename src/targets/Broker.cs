@@ -1,24 +1,33 @@
 using System;
-using System.Data.Common;
 using System.Net;
+using System.Net.Http;
 using System.Text;
+using NServiceBus.Transport.RabbitMQ;
 
-internal class Broker
+class Broker
 {
     public static void DeleteVirtualHost()
     {
         try
         {
-            GetBroker().CreateVirtualHostRequest("DELETE").GetResponse().Dispose();
+            Send(GetBroker().CreateVirtualHostRequest(HttpMethod.Delete));
         }
-        catch (WebException ex) when ((ex?.Response as HttpWebResponse)?.StatusCode == HttpStatusCode.NotFound)
+        catch (HttpRequestException ex) when (ex?.StatusCode == HttpStatusCode.NotFound)
         {
         }
     }
 
-    public static void CreateVirtualHost() => GetBroker().CreateVirtualHostRequest("PUT").GetResponse().Dispose();
+    public static void CreateVirtualHost() => Send(GetBroker().CreateVirtualHostRequest(HttpMethod.Put));
 
-    public static void AddUserToVirtualHost() => GetBroker().CreateUserPermissionRequest("PUT").GetResponse().Dispose();
+    public static void AddUserToVirtualHost() => Send(GetBroker().CreateUserPermissionRequest(HttpMethod.Put));
+
+    static void Send(HttpRequestMessage request)
+    {
+        using (var httpClient = new HttpClient())
+        {
+            httpClient.Send(request);
+        }
+    }
 
     public static Broker GetBroker()
     {
@@ -29,35 +38,24 @@ internal class Broker
             throw new Exception("The 'RabbitMQTransport_ConnectionString' environment variable is not set.");
         }
 
-        var connectionStringBuilder = new DbConnectionStringBuilder { ConnectionString = connectionString };
-
-        string hostName;
-
-        if (connectionStringBuilder.TryGetValue("host", out var value))
-        {
-            hostName = value.ToString();
-        }
-        else
-        {
-            throw new Exception("The connection string doesn't contain a value for 'host'.");
-        }
+        var connectionConfiguration = ConnectionConfiguration.Create(connectionString);
 
         return new Broker
         {
-            UserName = connectionStringBuilder.GetOrDefault("username", "guest"),
-            Password = connectionStringBuilder.GetOrDefault("password", "guest"),
-            VirtualHost = connectionStringBuilder.GetOrDefault("virtualhost", "/"),
-            HostName = hostName,
+            UserName = connectionConfiguration.UserName,
+            Password = connectionConfiguration.Password,
+            VirtualHost = connectionConfiguration.VirtualHost,
+            HostName = connectionConfiguration.Host,
             Port = 15672,
         };
     }
 
-    public HttpWebRequest CreateVirtualHostRequest(string method) =>
-        CreateHttpWebRequest($"http://{this.HostName}:{this.Port}/api/vhosts/{Uri.EscapeDataString(this.VirtualHost)}", method);
+    public HttpRequestMessage CreateVirtualHostRequest(HttpMethod method) =>
+        CreateHttpWebRequest($"http://{HostName}:{Port}/api/vhosts/{Uri.EscapeDataString(VirtualHost)}", method);
 
-    public HttpWebRequest CreateUserPermissionRequest(string method)
+    public HttpRequestMessage CreateUserPermissionRequest(HttpMethod method)
     {
-        var uriString = $"http://{this.HostName}:{this.Port}/api/permissions/{Uri.EscapeDataString(this.VirtualHost)}/{Uri.EscapeDataString(this.UserName)}";
+        var uriString = $"http://{HostName}:{Port}/api/permissions/{Uri.EscapeDataString(VirtualHost)}/{Uri.EscapeDataString(UserName)}";
 
         var request = CreateHttpWebRequest(uriString, method);
 
@@ -71,24 +69,18 @@ internal class Broker
 
         var bodyBytes = new ASCIIEncoding().GetBytes(bodyString);
 
-        request.ContentLength = bodyBytes.Length;
-
-        using (var stream = request.GetRequestStream())
-        {
-            stream.Write(bodyBytes, 0, bodyBytes.Length);
-        }
+        request.Content = new ByteArrayContent(bodyBytes);
+        request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 
         return request;
     }
 
-    public HttpWebRequest CreateHttpWebRequest(string uriString, string method)
+    public HttpRequestMessage CreateHttpWebRequest(string uriString, HttpMethod method)
     {
-        var request = WebRequest.CreateHttp(uriString);
+        var request = new HttpRequestMessage(method, uriString);
 
-        var encoded = Convert.ToBase64String(Encoding.GetEncoding("ISO-8859-1").GetBytes(this.UserName + ":" + this.Password));
+        var encoded = Convert.ToBase64String(Encoding.GetEncoding("ISO-8859-1").GetBytes(UserName + ":" + Password));
         request.Headers.Add("Authorization", "Basic " + encoded);
-        request.ContentType = "application/json";
-        request.Method = method;
 
         return request;
     }

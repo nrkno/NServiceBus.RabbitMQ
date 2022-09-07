@@ -5,6 +5,7 @@
     using System.Collections.Generic;
     using System.Linq;
     using global::RabbitMQ.Client;
+    using NServiceBus.Logging;
 
     /// <summary>
     /// Implements the RabbitMQ routing topology as described at http://codebetter.com/drusellers/2011/05/08/brain-dump-conventional-routing-in-rabbitmq/
@@ -23,12 +24,14 @@
     /// </summary>
     class ConventionalRoutingTopology : IRoutingTopology
     {
-        readonly bool useDurableExchanges;
+        readonly bool durable;
         readonly int maxPriority;
+        readonly QueueType queueType;
 
-        public ConventionalRoutingTopology(bool useDurableExchanges, int maxPriority = 0)
+        public ConventionalRoutingTopology(bool durable, QueueType queueType, int maxPriority = 0)
         {
-            this.useDurableExchanges = useDurableExchanges;
+            this.durable = durable;
+            this.queueType = queueType;
             this.maxPriority = maxPriority;
         }
 
@@ -61,30 +64,42 @@
         public void Publish(IModel channel, Type type, OutgoingMessage message, IBasicProperties properties)
         {
             SetupTypeSubscriptions(channel, type);
-            channel.BasicPublish(ExchangeName(type), String.Empty, false, properties, message.Body);
+            channel.BasicPublish(ExchangeName(type), string.Empty, false, properties, message.Body);
         }
 
         public void Send(IModel channel, string address, OutgoingMessage message, IBasicProperties properties)
         {
-            channel.BasicPublish(address, String.Empty, true, properties, message.Body);
+            channel.BasicPublish(address, string.Empty, true, properties, message.Body);
         }
 
-        public void RawSendInCaseOfFailure(IModel channel, string address, byte[] body, IBasicProperties properties)
+        public void RawSendInCaseOfFailure(IModel channel, string address, ReadOnlyMemory<byte> body, IBasicProperties properties)
         {
-            channel.BasicPublish(address, String.Empty, true, properties, body);
+            channel.BasicPublish(address, string.Empty, true, properties, body);
         }
 
         public void Initialize(IModel channel, IEnumerable<string> receivingAddresses, IEnumerable<string> sendingAddresses)
         {
-            var receiving = receivingAddresses as string[] ?? receivingAddresses.ToArray();
-            foreach (var address in receiving.Concat(sendingAddresses))
+            Dictionary<string, object> arguments;
+            var createDurableQueue = durable;
+
+            if (queueType == QueueType.Quorum)
             {
-                Dictionary<string, object> arguments = null;
-                if (maxPriority > 0 && receiving.Contains(address))
+                arguments = new Dictionary<string, object> { { "x-queue-type", "quorum" } };
+
+                if (createDurableQueue == false)
                 {
-                    arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };                    
+                    createDurableQueue = true;
+                    Logger.Warn("Quorum queues are always durable, so the non-durable setting is being ignored for queue declaration.");
                 }
-                channel.QueueDeclare(address, useDurableExchanges, false, false, arguments);
+            }
+            else
+            {
+                arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };
+            }
+
+            foreach (var address in receivingAddresses.Concat(sendingAddresses))
+            {
+                channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
                 CreateExchange(channel, address);
                 channel.QueueBind(address, address, string.Empty);
             }
@@ -99,7 +114,7 @@
 
         void SetupTypeSubscriptions(IModel channel, Type type)
         {
-            if (type == typeof(Object) || IsTypeTopologyKnownConfigured(type))
+            if (type == typeof(object) || IsTypeTopologyKnownConfigured(type))
             {
                 return;
             }
@@ -138,7 +153,7 @@
         {
             try
             {
-                channel.ExchangeDeclare(exchangeName, ExchangeType.Fanout, useDurableExchanges);
+                channel.ExchangeDeclare(exchangeName, ExchangeType.Fanout, durable);
             }
             // ReSharper disable EmptyGeneralCatchClause
             catch (Exception)
@@ -149,5 +164,7 @@
         }
 
         readonly ConcurrentDictionary<Type, string> typeTopologyConfiguredSet = new ConcurrentDictionary<Type, string>();
+
+        static readonly ILog Logger = LogManager.GetLogger(typeof(ConventionalRoutingTopology));
     }
 }

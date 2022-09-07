@@ -37,7 +37,7 @@
             public Publisher()
             {
                 EndpointSetup<DefaultServer>(c => c.UseTransport<RabbitMQTransport>()
-                    .UseDirectRoutingTopology());
+                    .UseDirectRoutingTopology(QueueType.Classic));
             }
         }
 
@@ -45,8 +45,9 @@
         {
             public Receiver()
             {
-                EndpointSetup<DefaultServer>(builder => {
-                    builder.UseTransport<RabbitMQTransport>().UseDirectRoutingTopology();
+                EndpointSetup<DefaultServer>(builder =>
+                {
+                    builder.UseTransport<RabbitMQTransport>().UseDirectRoutingTopology(QueueType.Classic);
                     builder.DisableFeature<AutoSubscribe>();
                 }, metadata => metadata.RegisterPublisherFor<IMyRequest>(typeof(Publisher)));
             }
@@ -64,7 +65,7 @@
                 {
                     myContext.GotTheMessage = true;
 
-                    return TaskEx.CompletedTask;
+                    return Task.CompletedTask;
                 }
             }
         }
@@ -77,7 +78,7 @@
         {
         }
 
-        public interface IOtherRequest: IEvent
+        public interface IOtherRequest : IEvent
         {
         }
 

@@ -1,12 +1,9 @@
-using System;
-using System.IO;
+using System.Threading.Tasks;
 using static Bullseye.Targets;
 
-internal static class Program
+static class Program
 {
-    private static readonly string testPackageBaseOutput = Path.GetDirectoryName(Uri.UnescapeDataString(new UriBuilder(typeof(Program).Assembly.CodeBase).Path));
-
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         Target("delete-virtual-host", () => Broker.DeleteVirtualHost());
 
@@ -16,6 +13,6 @@ internal static class Program
 
         Target("default", DependsOn("delete-virtual-host", "create-virtual-host", "add-user-to-virtual-host"));
 
-        RunTargetsAndExit(args);
+        await RunTargetsAndExitAsync(args).ConfigureAwait(false);
     }
 }

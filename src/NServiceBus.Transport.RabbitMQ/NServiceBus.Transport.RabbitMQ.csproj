@@ -1,15 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net452;netstandard2.0</TargetFrameworks>
-    <SignAssembly>true</SignAssembly>
-    <AssemblyOriginatorKeyFile>..\..\NServiceBus.snk</AssemblyOriginatorKeyFile>
+    <TargetFrameworks>net461;netstandard2.0</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="NServiceBus" Version="[7.1.6, 8.0.0)" />
-    <PackageReference Include="Particular.CodeRules" Version="0.2.1" PrivateAssets="All" />
-    <PackageReference Include="RabbitMQ.Client" Version="[5.1.0, 6.0.0)" />
+    <PackageReference Include="NServiceBus" Version="[7.7.3, 8.0.0)" />
+    <PackageReference Include="RabbitMQ.Client" Version="[6.4.0, 7.0.0)" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -20,5 +17,8 @@
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <NoWarn>;NU5125;NU5048</NoWarn>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="NServiceBus.Transport.RabbitMQ.Tests" Key="$(NServiceBusTestsKey)" />
+  </ItemGroup>
 
 </Project>

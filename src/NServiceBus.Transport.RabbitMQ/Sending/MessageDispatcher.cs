@@ -52,12 +52,12 @@
             var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
-            properties.Fill(message, transportOperation.DeliveryConstraints, out var destination);
+            properties.Fill(message, transportOperation.DeliveryConstraints);
             if (priority != null)
             {
                 properties.Priority = priority.Priority;
             }
-            return channel.SendMessage(destination ?? transportOperation.Destination, message, properties);
+            return channel.SendMessage(transportOperation.Destination, message, properties);
         }
 
         Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel, RabbitMQMessagePriority priority)
@@ -65,7 +65,7 @@
             var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
-            properties.Fill(message, transportOperation.DeliveryConstraints, out _);
+            properties.Fill(message, transportOperation.DeliveryConstraints);
             if (priority != null)
             {
                 properties.Priority = priority.Priority;

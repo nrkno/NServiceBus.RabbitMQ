@@ -6,7 +6,7 @@
     /// <summary>
     /// The delayed delivery settings.
     /// </summary>
-    public class DelayedDeliverySettings : ExposeSettings
+    public partial class DelayedDeliverySettings : ExposeSettings
     {
         internal DelayedDeliverySettings(SettingsHolder settings) : base(settings) { }
 

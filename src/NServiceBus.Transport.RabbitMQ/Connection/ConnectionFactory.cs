@@ -1,6 +1,8 @@
 ﻿namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
+    using System.Diagnostics;
+    using System.IO;
     using System.Net.Security;
     using System.Security.Authentication;
     using System.Security.Cryptography.X509Certificates;
@@ -11,11 +13,24 @@
     {
         static readonly ILog Logger = LogManager.GetLogger(typeof(IConnection));
 
+        readonly string endpointName;
         readonly global::RabbitMQ.Client.ConnectionFactory connectionFactory;
         readonly object lockObject = new object();
 
-        public ConnectionFactory(ConnectionConfiguration connectionConfiguration, X509CertificateCollection clientCertificates, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism)
+        public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, TimeSpan? heartbeatInterval, TimeSpan? networkRecoveryInterval)
         {
+            if (endpointName is null)
+            {
+                throw new ArgumentNullException(nameof(endpointName));
+            }
+
+            if (endpointName == string.Empty)
+            {
+                throw new ArgumentException("The endpoint name cannot be empty.", nameof(endpointName));
+            }
+
+            this.endpointName = endpointName;
+
             if (connectionConfiguration == null)
             {
                 throw new ArgumentNullException(nameof(connectionConfiguration));
@@ -33,13 +48,13 @@
                 VirtualHost = connectionConfiguration.VirtualHost,
                 UserName = connectionConfiguration.UserName,
                 Password = connectionConfiguration.Password,
-                RequestedHeartbeat = connectionConfiguration.RequestedHeartbeat,
-                NetworkRecoveryInterval = connectionConfiguration.RetryDelay,
+                RequestedHeartbeat = heartbeatInterval ?? connectionConfiguration.RequestedHeartbeat,
+                NetworkRecoveryInterval = networkRecoveryInterval ?? connectionConfiguration.RetryDelay,
                 UseBackgroundThreadsForIO = true
             };
 
             connectionFactory.Ssl.ServerName = connectionConfiguration.Host;
-            connectionFactory.Ssl.Certs = clientCertificates;
+            connectionFactory.Ssl.Certs = clientCertificateCollection;
             connectionFactory.Ssl.CertPath = connectionConfiguration.CertPath;
             connectionFactory.Ssl.CertPassphrase = connectionConfiguration.CertPassphrase;
             connectionFactory.Ssl.Version = SslProtocols.Tls12;
@@ -57,17 +72,38 @@
                 connectionFactory.AuthMechanisms = new[] { new ExternalMechanismFactory() };
             }
 
-            connectionFactory.ClientProperties.Clear();
-
-            foreach (var item in connectionConfiguration.ClientProperties)
-            {
-                connectionFactory.ClientProperties.Add(item.Key, item.Value);
-            }
+            SetClientProperties(endpointName, connectionConfiguration.UserName);
         }
 
-        public IConnection CreatePublishConnection() => CreateConnection("Publish", false);
+        void SetClientProperties(string endpointName, string userName)
+        {
+            connectionFactory.ClientProperties.Clear();
 
-        public IConnection CreateAdministrationConnection() => CreateConnection("Administration", false);
+            var nsbVersion = FileVersionInfo.GetVersionInfo(typeof(Endpoint).Assembly.Location);
+            var nsbFileVersion = $"{nsbVersion.FileMajorPart}.{nsbVersion.FileMinorPart}.{nsbVersion.FileBuildPart}";
+
+            var rabbitMQVersion = FileVersionInfo.GetVersionInfo(typeof(ConnectionConfiguration).Assembly.Location);
+            var rabbitMQFileVersion = $"{rabbitMQVersion.FileMajorPart}.{rabbitMQVersion.FileMinorPart}.{rabbitMQVersion.FileBuildPart}";
+
+            var applicationNameAndPath = Environment.GetCommandLineArgs()[0];
+            var applicationName = Path.GetFileName(applicationNameAndPath);
+            var applicationPath = Path.GetDirectoryName(applicationNameAndPath);
+
+            var hostname = Environment.MachineName;
+
+            connectionFactory.ClientProperties.Add("client_api", "NServiceBus");
+            connectionFactory.ClientProperties.Add("nservicebus_version", nsbFileVersion);
+            connectionFactory.ClientProperties.Add("nservicebus.rabbitmq_version", rabbitMQFileVersion);
+            connectionFactory.ClientProperties.Add("application", applicationName);
+            connectionFactory.ClientProperties.Add("application_location", applicationPath);
+            connectionFactory.ClientProperties.Add("machine_name", hostname);
+            connectionFactory.ClientProperties.Add("user", userName);
+            connectionFactory.ClientProperties.Add("endpoint_name", endpointName);
+        }
+
+        public IConnection CreatePublishConnection() => CreateConnection($"{endpointName} Publish", false);
+
+        public IConnection CreateAdministrationConnection() => CreateConnection($"{endpointName} Administration", false);
 
         public IConnection CreateConnection(string connectionName, bool automaticRecoveryEnabled = true)
         {

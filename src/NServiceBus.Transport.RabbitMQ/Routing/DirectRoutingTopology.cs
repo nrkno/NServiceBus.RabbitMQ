@@ -4,16 +4,18 @@
     using System.Collections.Generic;
     using System.Linq;
     using global::RabbitMQ.Client;
+    using NServiceBus.Logging;
 
     /// <summary>
     /// Route using a static routing convention for routing messages from publishers to subscribers using routing keys.
     /// </summary>
     class DirectRoutingTopology : IRoutingTopology
     {
-        public DirectRoutingTopology(Conventions conventions, bool useDurableExchanges)
+        public DirectRoutingTopology(Conventions conventions, bool durable, QueueType queueType)
         {
             this.conventions = conventions;
-            this.useDurableExchanges = useDurableExchanges;
+            this.durable = durable;
+            this.queueType = queueType;
         }
 
         public void SetupSubscription(IModel channel, Type type, string subscriberName)
@@ -37,16 +39,30 @@
             channel.BasicPublish(string.Empty, address, true, properties, message.Body);
         }
 
-        public void RawSendInCaseOfFailure(IModel channel, string address, byte[] body, IBasicProperties properties)
+        public void RawSendInCaseOfFailure(IModel channel, string address, ReadOnlyMemory<byte> body, IBasicProperties properties)
         {
             channel.BasicPublish(string.Empty, address, true, properties, body);
         }
 
         public void Initialize(IModel channel, IEnumerable<string> receivingAddresses, IEnumerable<string> sendingAddresses)
         {
+            Dictionary<string, object> arguments = null;
+            var createDurableQueue = durable;
+
+            if (queueType == QueueType.Quorum)
+            {
+                arguments = new Dictionary<string, object> { { "x-queue-type", "quorum" } };
+
+                if (createDurableQueue == false)
+                {
+                    createDurableQueue = true;
+                    Logger.Warn("Quorum queues are always durable, so the non-durable setting is being ignored for queue declaration.");
+                }
+            }
+
             foreach (var address in receivingAddresses.Concat(sendingAddresses))
             {
-                channel.QueueDeclare(address, useDurableExchanges, false, false, null);
+                channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
             }
         }
 
@@ -66,7 +82,7 @@
 
             try
             {
-                channel.ExchangeDeclare(exchangeName, ExchangeType.Topic, useDurableExchanges);
+                channel.ExchangeDeclare(exchangeName, ExchangeType.Topic, durable);
             }
             // ReSharper disable EmptyGeneralCatchClause
             catch (Exception)
@@ -91,7 +107,10 @@
         const string AmqpTopicExchange = "amq.topic";
 
         readonly Conventions conventions;
-        readonly bool useDurableExchanges;
+        readonly bool durable;
+        readonly QueueType queueType;
+
+        static readonly ILog Logger = LogManager.GetLogger(typeof(DirectRoutingTopology));
 
         public class Conventions
         {

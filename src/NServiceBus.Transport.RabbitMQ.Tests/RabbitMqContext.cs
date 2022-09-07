@@ -15,7 +15,7 @@
         [SetUp]
         public void SetUp()
         {
-            routingTopology = new ConventionalRoutingTopology(true);
+            routingTopology = new ConventionalRoutingTopology(true, QueueType.Classic);
             receivedMessages = new BlockingCollection<IncomingMessage>();
 
             var connectionString = Environment.GetEnvironmentVariable("RabbitMQTransport_ConnectionString");
@@ -25,17 +25,17 @@
                 throw new Exception("The 'RabbitMQTransport_ConnectionString' environment variable is not set.");
             }
 
-            var config = ConnectionConfiguration.Create(connectionString, ReceiverQueue);
+            var config = ConnectionConfiguration.Create(connectionString);
 
-            connectionFactory = new ConnectionFactory(config, null, false, false);
-            channelProvider = new ChannelProvider(connectionFactory, config.RetryDelay, routingTopology, true);
+            connectionFactory = new ConnectionFactory(ReceiverQueue, config, default, false, false, default, default);
+            channelProvider = new ChannelProvider(connectionFactory, config.RetryDelay, routingTopology);
             channelProvider.CreateConnection();
 
             messageDispatcher = new MessageDispatcher(channelProvider);
 
             var purger = new QueuePurger(connectionFactory);
 
-            messagePump = new MessagePump(connectionFactory, new MessageConverter(), "Unit test", channelProvider, purger, TimeSpan.FromMinutes(2), 3, 0);
+            messagePump = new MessagePump(connectionFactory, new MessageConverter(), "Unit test", channelProvider, purger, TimeSpan.FromMinutes(2), 3, 0, config.RetryDelay);
 
             routingTopology.Reset(connectionFactory, new[] { ReceiverQueue }.Concat(AdditionalReceiverQueues), new[] { ErrorQueue });
 
@@ -44,10 +44,10 @@
             messagePump.Init(messageContext =>
             {
                 receivedMessages.Add(new IncomingMessage(messageContext.MessageId, messageContext.Headers, messageContext.Body));
-                return TaskEx.CompletedTask;
+                return Task.CompletedTask;
             },
                 ErrorContext => Task.FromResult(ErrorHandleResult.Handled),
-                new CriticalError(_ => TaskEx.CompletedTask),
+                new CriticalError(_ => Task.CompletedTask),
                 new PushSettings(ReceiverQueue, ErrorQueue, true, TransportTransactionMode.ReceiveOnly)
             ).GetAwaiter().GetResult();
 
@@ -90,6 +90,6 @@
         BlockingCollection<IncomingMessage> receivedMessages;
         ConventionalRoutingTopology routingTopology;
 
-        static readonly TimeSpan incomingMessageTimeout = TimeSpan.FromSeconds(1);
+        static readonly TimeSpan incomingMessageTimeout = TimeSpan.FromSeconds(5);
     }
 }

@@ -13,33 +13,33 @@
 
     sealed class RabbitMQTransportInfrastructure : TransportInfrastructure
     {
-        const string coreSendOnlyEndpointKey = "Endpoint.SendOnly";
         const string coreHostInformationDisplayNameKey = "NServiceBus.HostInformation.DisplayName";
 
         readonly SettingsHolder settings;
+        readonly TimeSpan networkRetryDelay;
         readonly ConnectionFactory connectionFactory;
+        readonly IRoutingTopology routingTopology;
         readonly ChannelProvider channelProvider;
-        IRoutingTopology routingTopology;
 
         public RabbitMQTransportInfrastructure(SettingsHolder settings, string connectionString)
         {
             this.settings = settings;
 
-            var connectionConfiguration = ConnectionConfiguration.Create(connectionString, settings.EndpointName());
+            var endpointName = settings.EndpointName();
+            var connectionConfiguration = ConnectionConfiguration.Create(connectionString);
 
-            settings.TryGet(SettingsKeys.ClientCertificates, out X509CertificateCollection clientCertificates);
+            settings.TryGet(SettingsKeys.ClientCertificateCollection, out X509Certificate2Collection clientCertificateCollection);
             settings.TryGet(SettingsKeys.DisableRemoteCertificateValidation, out bool disableRemoteCertificateValidation);
             settings.TryGet(SettingsKeys.UseExternalAuthMechanism, out bool useExternalAuthMechanism);
-            connectionFactory = new ConnectionFactory(connectionConfiguration, clientCertificates, disableRemoteCertificateValidation, useExternalAuthMechanism);
+            settings.TryGet(SettingsKeys.HeartbeatInterval, out TimeSpan? heartbeatInterval);
+            settings.TryGet(SettingsKeys.NetworkRecoveryInterval, out TimeSpan? networkRecoveryInterval);
+            networkRetryDelay = networkRecoveryInterval ?? connectionConfiguration.RetryDelay;
+
+            connectionFactory = new ConnectionFactory(endpointName, connectionConfiguration, clientCertificateCollection, disableRemoteCertificateValidation, useExternalAuthMechanism, heartbeatInterval, networkRecoveryInterval);
 
             routingTopology = CreateRoutingTopology();
 
-            if (!settings.TryGet(SettingsKeys.UsePublisherConfirms, out bool usePublisherConfirms))
-            {
-                usePublisherConfirms = true;
-            }
-
-            channelProvider = new ChannelProvider(connectionFactory, connectionConfiguration.RetryDelay, routingTopology, usePublisherConfirms);
+            channelProvider = new ChannelProvider(connectionFactory, networkRetryDelay, routingTopology);
         }
 
         public override IEnumerable<Type> DeliveryConstraints => new List<Type> { typeof(DiscardIfNotReceivedBefore), typeof(NonDurableDelivery), typeof(DoNotDeliverBefore), typeof(DelayDeliveryWith) };
@@ -108,11 +108,6 @@
 
             if (!settings.TryGet(SettingsKeys.UseDurableExchangesAndQueues, out bool useDurableExchangesAndQueues))
             {
-                if (!settings.DurableMessagesEnabled())
-                {
-                    throw new Exception("When durable messages are disabled, 'EndpointConfiguration.UseTransport<RabbitMQTransport>().UseDurableExchangesAndQueues()' must also be called to specify exchange and queue durability settings.");
-                }
-
                 useDurableExchangesAndQueues = true;
             }
 
@@ -156,7 +151,7 @@
                 prefetchCount = 0;
             }
 
-            return new MessagePump(connectionFactory, messageConverter, consumerTag, channelProvider, queuePurger, timeToWaitBeforeTriggeringCircuitBreaker, prefetchMultiplier, prefetchCount);
+            return new MessagePump(connectionFactory, messageConverter, consumerTag, channelProvider, queuePurger, timeToWaitBeforeTriggeringCircuitBreaker, prefetchMultiplier, prefetchCount, networkRetryDelay);
         }
     }
 }
