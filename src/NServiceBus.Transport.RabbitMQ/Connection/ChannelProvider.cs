@@ -2,6 +2,7 @@ namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
     using System.Collections.Concurrent;
+    using System.Threading;
     using System.Threading.Tasks;
     using global::RabbitMQ.Client;
     using Logging;
@@ -30,15 +31,16 @@ namespace NServiceBus.Transport.RabbitMQ
             {
                 var connection = (IConnection)sender;
 
-                _ = Task.Run(() => Reconnect(connection.ClientProvidedName));
+                // Task.Run() so the call returns immediately instead of waiting for the first await or return down the call stack
+                _ = Task.Run(() => ReconnectSwallowingExceptions(connection.ClientProvidedName), CancellationToken.None);
             }
         }
 
-        async Task Reconnect(string connectionName)
+#pragma warning disable PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
+        async Task ReconnectSwallowingExceptions(string connectionName)
+#pragma warning restore PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
         {
-            var reconnected = false;
-
-            while (!reconnected)
+            while (true)
             {
                 Logger.InfoFormat("'{0}': Attempting to reconnect in {1} seconds.", connectionName, retryDelay.TotalSeconds);
 
@@ -47,15 +49,15 @@ namespace NServiceBus.Transport.RabbitMQ
                 try
                 {
                     CreateConnection();
-                    reconnected = true;
-
-                    Logger.InfoFormat("'{0}': Connection to the broker reestablished successfully.", connectionName);
+                    break;
                 }
-                catch (Exception e)
+                catch (Exception ex)
                 {
-                    Logger.InfoFormat("'{0}': Reconnecting to the broker failed: {1}", connectionName, e);
+                    Logger.InfoFormat("'{0}': Reconnecting to the broker failed: {1}", connectionName, ex);
                 }
             }
+
+            Logger.InfoFormat("'{0}': Connection to the broker reestablished successfully.", connectionName);
         }
 
         public ConfirmsAwareChannel GetPublishChannel()
@@ -84,10 +86,7 @@ namespace NServiceBus.Transport.RabbitMQ
 
         public void Dispose()
         {
-            if (connection != null)
-            {
-                connection.Dispose();
-            }
+            connection?.Dispose();
 
             foreach (var channel in channels)
             {

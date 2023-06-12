@@ -2,150 +2,196 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
+    using BitFaster.Caching.Lru;
     using Extensibility;
     using global::RabbitMQ.Client;
     using global::RabbitMQ.Client.Events;
     using global::RabbitMQ.Client.Exceptions;
     using Logging;
 
-    sealed class MessagePump : IPushMessages, IDisposable
+    sealed class MessagePump : IMessageReceiver, IDisposable
     {
         static readonly ILog Logger = LogManager.GetLogger(typeof(MessagePump));
-        static readonly TransportTransaction transportTransaction = new TransportTransaction();
+        static readonly TransportTransaction transportTransaction = new();
 
+        readonly ReceiveSettings settings;
         readonly ConnectionFactory connectionFactory;
         readonly MessageConverter messageConverter;
         readonly string consumerTag;
         readonly ChannelProvider channelProvider;
-        readonly QueuePurger queuePurger;
         readonly TimeSpan timeToWaitBeforeTriggeringCircuitBreaker;
-        readonly int prefetchMultiplier;
-        readonly ushort overriddenPrefetchCount;
+        readonly QueuePurger queuePurger;
+        readonly PrefetchCountCalculation prefetchCountCalculation;
+        readonly Action<string, Exception, CancellationToken> criticalErrorAction;
         readonly TimeSpan retryDelay;
+        readonly string name;
+        readonly FastConcurrentLru<string, int> deliveryAttempts = new(100);
+        readonly FastConcurrentLru<string, bool> failedBasicAckMessages = new(100);
 
-        // Init
-        Func<MessageContext, Task> onMessage;
-        Func<ErrorContext, Task<ErrorHandleResult>> onError;
-        PushSettings settings;
-        CriticalError criticalError;
-        string name;
-        MessagePumpConnectionFailedCircuitBreaker circuitBreaker;
-        TaskScheduler exclusiveScheduler;
-
-        // Start
+        bool disposed;
+        OnMessage onMessage;
+        OnError onError;
         int maxConcurrency;
-        SemaphoreSlim semaphore;
-        CancellationTokenSource messageProcessing;
+        long numberOfMessagesBeingProcessed;
+        CancellationTokenSource messagePumpCancellationTokenSource;
+        CancellationTokenSource messageProcessingCancellationTokenSource;
+        MessagePumpConnectionFailedCircuitBreaker circuitBreaker;
         IConnection connection;
 
         // Stop
         TaskCompletionSource<bool> connectionShutdownCompleted;
 
-        public MessagePump(ConnectionFactory connectionFactory, MessageConverter messageConverter, string consumerTag, ChannelProvider channelProvider, QueuePurger queuePurger, TimeSpan timeToWaitBeforeTriggeringCircuitBreaker, int prefetchMultiplier, ushort overriddenPrefetchCount, TimeSpan retryDelay)
+        public MessagePump(
+            ReceiveSettings settings,
+            ConnectionFactory connectionFactory,
+            IRoutingTopology routingTopology,
+            MessageConverter messageConverter,
+            string consumerTag,
+            ChannelProvider channelProvider,
+            TimeSpan timeToWaitBeforeTriggeringCircuitBreaker,
+            PrefetchCountCalculation prefetchCountCalculation,
+            Action<string, Exception,
+            CancellationToken> criticalErrorAction,
+            TimeSpan retryDelay)
         {
+            this.settings = settings;
             this.connectionFactory = connectionFactory;
             this.messageConverter = messageConverter;
             this.consumerTag = consumerTag;
             this.channelProvider = channelProvider;
-            this.queuePurger = queuePurger;
             this.timeToWaitBeforeTriggeringCircuitBreaker = timeToWaitBeforeTriggeringCircuitBreaker;
-            this.prefetchMultiplier = prefetchMultiplier;
-            this.overriddenPrefetchCount = overriddenPrefetchCount;
+            this.prefetchCountCalculation = prefetchCountCalculation;
+            this.criticalErrorAction = criticalErrorAction;
             this.retryDelay = retryDelay;
+
+            ReceiveAddress = RabbitMQTransportInfrastructure.TranslateAddress(settings.ReceiveAddress);
+
+            if (settings.UsePublishSubscribe)
+            {
+                Subscriptions = new SubscriptionManager(connectionFactory, routingTopology, ReceiveAddress);
+            }
+
+            queuePurger = new QueuePurger(connectionFactory);
+
+            name = $"{ReceiveAddress} MessagePump";
         }
 
-        public Task Init(Func<MessageContext, Task> onMessage, Func<ErrorContext, Task<ErrorHandleResult>> onError, CriticalError criticalError, PushSettings settings)
+        public ISubscriptionManager Subscriptions { get; }
+        public string Id => settings.Id;
+
+        public string ReceiveAddress { get; }
+
+        public Task Initialize(PushRuntimeSettings limitations, OnMessage onMessage, OnError onError, CancellationToken cancellationToken = default)
         {
             this.onMessage = onMessage;
             this.onError = onError;
-            this.settings = settings;
-            this.criticalError = criticalError;
-
-            name = $"{settings.InputQueue} MessagePump";
-
-            circuitBreaker = new MessagePumpConnectionFailedCircuitBreaker(name, timeToWaitBeforeTriggeringCircuitBreaker, criticalError);
-
-            exclusiveScheduler = new ConcurrentExclusiveSchedulerPair().ExclusiveScheduler;
+            maxConcurrency = limitations.MaxConcurrency;
 
             if (settings.PurgeOnStartup)
             {
-                queuePurger.Purge(settings.InputQueue);
+                queuePurger.Purge(ReceiveAddress);
             }
 
             return Task.CompletedTask;
         }
 
-        public void Start(PushRuntimeSettings limitations)
+        public Task StartReceive(CancellationToken cancellationToken = default)
         {
-            maxConcurrency = limitations.MaxConcurrency;
-            semaphore = new SemaphoreSlim(limitations.MaxConcurrency, limitations.MaxConcurrency);
-            messageProcessing = new CancellationTokenSource();
+            messagePumpCancellationTokenSource = new CancellationTokenSource();
+            messageProcessingCancellationTokenSource = new CancellationTokenSource();
+
+            circuitBreaker = new MessagePumpConnectionFailedCircuitBreaker(
+                name,
+                timeToWaitBeforeTriggeringCircuitBreaker,
+                (message, exception) => criticalErrorAction(message, exception, messageProcessingCancellationTokenSource.Token));
 
             ConnectToBroker();
+
+            return Task.CompletedTask;
+        }
+
+        public Task ChangeConcurrency(PushRuntimeSettings limitations, CancellationToken cancellationToken = default)
+        {
+            maxConcurrency = limitations.MaxConcurrency;
+            Logger.InfoFormat("Calling a change concurrency and reconnecting with new value {0}.", limitations.MaxConcurrency);
+            _ = Task.Run(() => Reconnect(messageProcessingCancellationTokenSource.Token), cancellationToken);
+            return Task.CompletedTask;
         }
 
         void ConnectToBroker()
         {
-            connection = connectionFactory.CreateConnection($"{settings.InputQueue} MessagePump");
+            connection = connectionFactory.CreateConnection(name, false, maxConcurrency);
             connection.ConnectionShutdown += Connection_ConnectionShutdown;
 
-            long prefetchCount;
+            var prefetchCount = prefetchCountCalculation(maxConcurrency);
 
-            if (overriddenPrefetchCount > 0)
+            if (prefetchCount < maxConcurrency)
             {
-                prefetchCount = overriddenPrefetchCount;
-
-                if (prefetchCount < maxConcurrency)
-                {
-                    Logger.Warn($"The specified prefetch count '{prefetchCount}' is smaller than the specified maximum concurrency '{maxConcurrency}'. The maximum concurrency value will be used as the prefetch count instead.");
-                    prefetchCount = maxConcurrency;
-                }
-            }
-            else
-            {
-                prefetchCount = (long)maxConcurrency * prefetchMultiplier;
+                Logger.Warn($"The specified prefetch count '{prefetchCount}' is smaller than the specified maximum concurrency '{maxConcurrency}'. The maximum concurrency value will be used as the prefetch count instead.");
+                prefetchCount = maxConcurrency;
             }
 
             var channel = connection.CreateModel();
             channel.ModelShutdown += Channel_ModelShutdown;
             channel.BasicQos(0, (ushort)Math.Min(prefetchCount, ushort.MaxValue), false);
 
-            var consumer = new EventingBasicConsumer(channel);
+            var consumer = new AsyncEventingBasicConsumer(channel);
             consumer.ConsumerCancelled += Consumer_ConsumerCancelled;
             consumer.Registered += Consumer_Registered;
             consumer.Received += Consumer_Received;
 
-            channel.BasicConsume(settings.InputQueue, false, consumerTag, consumer);
+            channel.BasicConsume(ReceiveAddress, false, consumerTag, consumer);
         }
 
-        public async Task Stop()
+        public async Task StopReceive(CancellationToken cancellationToken = default)
         {
-            messageProcessing.Cancel();
+            messagePumpCancellationTokenSource?.Cancel();
 
-            while (semaphore.CurrentCount != maxConcurrency)
+            using (cancellationToken.Register(() => messageProcessingCancellationTokenSource?.Cancel()))
             {
-                await Task.Delay(50).ConfigureAwait(false);
-            }
+                while (Interlocked.Read(ref numberOfMessagesBeingProcessed) > 0)
+                {
+                    // We are deliberately not forwarding the cancellation token here because
+                    // this loop is our way of waiting for all pending messaging operations
+                    // to participate in cooperative cancellation or not.
+                    // We do not want to rudely abort them because the cancellation token has been canceled.
+                    // This allows us to preserve the same behaviour in v8 as in v7 in that,
+                    // if CancellationToken.None is passed to this method,
+                    // the method will only return when all in flight messages have been processed.
+                    // If, on the other hand, a non-default CancellationToken is passed,
+                    // all message processing operations have the opportunity to
+                    // participate in cooperative cancellation.
+                    // If we ever require a method of stopping the endpoint such that
+                    // all message processing is canceled immediately,
+                    // we can provide that as a separate feature.
+                    await Task.Delay(50, CancellationToken.None).ConfigureAwait(false);
+                }
 
-            connectionShutdownCompleted = new TaskCompletionSource<bool>();
+                connectionShutdownCompleted = new TaskCompletionSource<bool>();
 
-            if (connection.IsOpen)
-            {
-                connection.Close();
-            }
-            else
-            {
-                connectionShutdownCompleted.SetResult(true);
-            }
+                if (connection.IsOpen)
+                {
+                    connection.Close();
+                }
+                else
+                {
+                    connectionShutdownCompleted.SetResult(true);
+                }
 
-            await connectionShutdownCompleted.Task.ConfigureAwait(false);
+                await connectionShutdownCompleted.Task.ConfigureAwait(false);
+            }
         }
 
-        void Consumer_Registered(object sender, ConsumerEventArgs e)
+#pragma warning disable PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
+        Task Consumer_Registered(object sender, ConsumerEventArgs e)
+#pragma warning restore PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
         {
             circuitBreaker.Success();
+
+            return Task.CompletedTask;
         }
 
         void Connection_ConnectionShutdown(object sender, ShutdownEventArgs e)
@@ -158,7 +204,7 @@
             {
                 //log entry handled by event handler registered in ConnectionFactory
                 circuitBreaker.Failure(new Exception(e.ToString()));
-                _ = Task.Run(() => Reconnect());
+                _ = Task.Run(() => Reconnect(messageProcessingCancellationTokenSource.Token));
             }
             else
             {
@@ -182,7 +228,7 @@
             {
                 Logger.WarnFormat("'{0}' channel shutdown: {1}", name, e);
                 circuitBreaker.Failure(new Exception(e.ToString()));
-                _ = Task.Run(() => Reconnect());
+                _ = Task.Run(() => Reconnect(messageProcessingCancellationTokenSource.Token));
             }
             else
             {
@@ -190,9 +236,11 @@
             }
         }
 
-        void Consumer_ConsumerCancelled(object sender, ConsumerEventArgs e)
+#pragma warning disable PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
+        Task Consumer_ConsumerCancelled(object sender, ConsumerEventArgs e)
+#pragma warning restore PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
         {
-            var consumer = (EventingBasicConsumer)sender;
+            var consumer = (AsyncEventingBasicConsumer)sender;
 
             if (consumer.Model.IsOpen && connection.IsOpen)
             {
@@ -200,46 +248,49 @@
                 {
                     Logger.WarnFormat("'{0}' consumer canceled by broker", name);
                     circuitBreaker.Failure(new Exception($"'{name}' consumer canceled by broker"));
-                    _ = Task.Run(() => Reconnect());
+                    _ = Task.Run(() => Reconnect(messageProcessingCancellationTokenSource.Token));
                 }
                 else
                 {
                     Logger.WarnFormat("'{0}' consumer canceled by broker while reconnect already in progress", name);
                 }
             }
+
+            return Task.CompletedTask;
         }
 
-        async Task Reconnect()
+        async Task Reconnect(CancellationToken cancellationToken)
         {
             try
             {
-                var oldConnection = connection;
 
-                while (true)
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    Logger.InfoFormat("'{0}': Attempting to reconnect in {1} seconds.", name, retryDelay.TotalSeconds);
-
-                    await Task.Delay(retryDelay, messageProcessing.Token).ConfigureAwait(false);
-
                     try
                     {
+                        if (connection.IsOpen)
+                        {
+                            connection.Close();
+                        }
+
+                        connection.Dispose();
+
+                        Logger.InfoFormat("'{0}': Attempting to reconnect in {1} seconds.", name, retryDelay.TotalSeconds);
+
+                        await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+
                         ConnectToBroker();
                         break;
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!ex.IsCausedBy(cancellationToken))
                     {
                         Logger.InfoFormat("'{0}': Reconnecting to the broker failed: {1}", name, ex);
                     }
                 }
-                Logger.InfoFormat("'{0}': Connection to the broker reestablished successfully.", name);
 
-                if (oldConnection.IsOpen)
-                {
-                    oldConnection.Close();
-                    oldConnection.Dispose();
-                }
+                Logger.InfoFormat("'{0}': Connection to the broker reestablished successfully.", name);
             }
-            catch (OperationCanceledException ex) when (messageProcessing.Token.IsCancellationRequested)
+            catch (Exception ex) when (ex.IsCausedBy(cancellationToken))
             {
                 Logger.DebugFormat("'{0}': Reconnection canceled since the transport is being stopped: {1}", name, ex);
             }
@@ -249,78 +300,54 @@
             }
         }
 
-        async void Consumer_Received(object sender, BasicDeliverEventArgs eventArgs)
+#pragma warning disable PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
+        async Task Consumer_Received(object sender, BasicDeliverEventArgs eventArgs)
+#pragma warning restore PS0018 // A task-returning method should have a CancellationToken parameter unless it has a parameter implementing ICancellableContext
         {
-            if (messageProcessing.IsCancellationRequested)
+            if (messagePumpCancellationTokenSource.IsCancellationRequested)
             {
                 return;
             }
 
-            var consumer = (EventingBasicConsumer)sender;
+            var consumer = (AsyncEventingBasicConsumer)sender;
 
-            var eventRaisingThreadId = Thread.CurrentThread.ManagedThreadId;
+            await ProcessAndSwallowExceptions(consumer, eventArgs, messageProcessingCancellationTokenSource.Token).ConfigureAwait(false);
+        }
 
-            var messageBody = eventArgs.Body.ToArray();
-
-            var eventArgsCopy = new BasicDeliverEventArgs(
-                consumerTag: eventArgs.ConsumerTag,
-                deliveryTag: eventArgs.DeliveryTag,
-                redelivered: eventArgs.Redelivered,
-                exchange: eventArgs.Exchange,
-                routingKey: eventArgs.RoutingKey,
-                properties: eventArgs.BasicProperties,
-                body: messageBody
-            );
+        async Task ProcessAndSwallowExceptions(AsyncEventingBasicConsumer consumer, BasicDeliverEventArgs message, CancellationToken messageProcessingCancellationToken)
+        {
+            Interlocked.Increment(ref numberOfMessagesBeingProcessed);
 
             try
             {
-                await semaphore.WaitAsync(messageProcessing.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-
-            try
-            {
-                // The current thread will be the event-raising thread if either:
-                //
-                // a) the semaphore was entered synchronously (did not have to wait).
-                // b) the event was raised on a thread pool thread,
-                //    and the semaphore was entered asynchronously (had to wait),
-                //    and the continuation happened to be scheduled back onto the same thread.
-                if (Thread.CurrentThread.ManagedThreadId == eventRaisingThreadId)
+                try
                 {
-                    // In RabbitMQ.Client 4.1.0, the event is raised by reusing a single, explicitly created thread,
-                    // so we are in scenario (a) described above.
-                    // We must yield to allow the thread to raise more events while we handle this one,
-                    // otherwise we will never process messages concurrently.
-                    //
-                    // If a future version of RabbitMQ.Client changes its threading model, then either:
-                    //
-                    // 1) we are in scenario (a), but we *may not* need to yield.
-                    //    E.g. the client may raise the event on a new, explicitly created thread each time.
-                    // 2) we cannot tell whether we are in scenario (a) or scenario (b).
-                    //    E.g. the client may raise the event on a thread pool thread.
-                    //
-                    // In both cases, we cannot tell whether we need to yield or not, so we must yield.
-                    await Task.Yield();
+                    await Process(consumer, message, messageProcessingCancellationToken).ConfigureAwait(false);
                 }
-
-                await Process(consumer, eventArgsCopy, messageBody).ConfigureAwait(false);
+#pragma warning disable PS0019 // Do not catch Exception without considering OperationCanceledException - handling is the same for OCE
+                catch (Exception ex)
+#pragma warning restore PS0019 // Do not catch Exception without considering OperationCanceledException
+                {
+                    Logger.Debug("Returning message to queue...", ex);
+                    consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag);
+                    throw;
+                }
+            }
+            catch (Exception ex) when (ex.IsCausedBy(messageProcessingCancellationToken))
+            {
+                Logger.Debug("Message processing canceled.", ex);
             }
             catch (Exception ex)
             {
-                Logger.Warn("Failed to process message. Returning message to queue...", ex);
-                await consumer.Model.BasicRejectAndRequeueIfOpen(eventArgs.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
+                Logger.Error("Message processing failed.", ex);
             }
             finally
             {
-                semaphore.Release();
+                Interlocked.Decrement(ref numberOfMessagesBeingProcessed);
             }
         }
 
-        async Task Process(EventingBasicConsumer consumer, BasicDeliverEventArgs message, byte[] messageBody)
+        async Task Process(AsyncEventingBasicConsumer consumer, BasicDeliverEventArgs message, CancellationToken messageProcessingCancellationToken)
         {
             Dictionary<string, string> headers;
 
@@ -331,7 +358,7 @@
             catch (Exception ex)
             {
                 Logger.Error($"Failed to retrieve headers from poison message. Moving message to queue '{settings.ErrorQueue}'...", ex);
-                await MovePoisonMessage(consumer, message, settings.ErrorQueue).ConfigureAwait(false);
+                await MovePoisonMessage(consumer, message, settings.ErrorQueue, messageProcessingCancellationToken).ConfigureAwait(false);
 
                 return;
             }
@@ -345,76 +372,114 @@
             catch (Exception ex)
             {
                 Logger.Error($"Failed to retrieve ID from poison message. Moving message to queue '{settings.ErrorQueue}'...", ex);
-                await MovePoisonMessage(consumer, message, settings.ErrorQueue).ConfigureAwait(false);
+                await MovePoisonMessage(consumer, message, settings.ErrorQueue, messageProcessingCancellationToken).ConfigureAwait(false);
 
                 return;
             }
 
-            using (var tokenSource = new CancellationTokenSource())
+            var messageIdKey = CreateMessageIdKey(headers, messageId);
+
+            if (failedBasicAckMessages.TryGet(messageIdKey, out _))
             {
-                var processed = false;
-                var errorHandled = false;
-                var numberOfDeliveryAttempts = 0;
-
-                while (!processed && !errorHandled)
+                try
                 {
-                    try
-                    {
-                        var contextBag = new ContextBag();
-                        contextBag.Set(message);
-
-                        var messageContext = new MessageContext(messageId, headers, messageBody ?? new byte[0], transportTransaction, tokenSource, contextBag);
-
-                        await onMessage(messageContext).ConfigureAwait(false);
-                        processed = true;
-                    }
-                    catch (Exception exception)
-                    {
-                        ++numberOfDeliveryAttempts;
-                        headers = messageConverter.RetrieveHeaders(message);
-                        var contextBag = new ContextBag();
-                        contextBag.Set(message);
-
-                        var errorContext = new ErrorContext(exception, headers, messageId, messageBody ?? new byte[0], transportTransaction, numberOfDeliveryAttempts, contextBag);
-
-                        try
-                        {
-                            errorHandled = await onError(errorContext).ConfigureAwait(false) == ErrorHandleResult.Handled;
-
-                            if (!errorHandled)
-                            {
-                                headers = messageConverter.RetrieveHeaders(message);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            criticalError.Raise($"Failed to execute recoverability policy for message with native ID: `{messageId}`", ex);
-                            await consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
-
-                            return;
-                        }
-                    }
+                    consumer.Model.BasicAckSingle(message.DeliveryTag);
+                }
+                catch (AlreadyClosedException ex)
+                {
+                    Logger.Warn($"Failed to acknowledge message '{messageId}' because the channel was closed. The message was returned to the queue.", ex);
                 }
 
-                if (processed && tokenSource.IsCancellationRequested)
+                return;
+            }
+
+            var processingContext = new ContextBag();
+            processingContext.Set(message);
+
+            try
+            {
+                var messageContext = new MessageContext(messageId, headers, message.Body, transportTransaction, ReceiveAddress, processingContext);
+                await onMessage(messageContext, messageProcessingCancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ex.IsCausedBy(messageProcessingCancellationToken))
+            {
+                var numberOfDeliveryAttempts = GetDeliveryAttempts(message, messageIdKey);
+                headers = messageConverter.RetrieveHeaders(message);
+                var errorContext = new ErrorContext(ex, headers, messageId, message.Body, transportTransaction, numberOfDeliveryAttempts, ReceiveAddress, processingContext);
+
+                try
                 {
-                    await consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
+                    var result = await onError(errorContext, messageProcessingCancellationToken).ConfigureAwait(false);
+
+                    if (result == ErrorHandleResult.RetryRequired)
+                    {
+                        consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag);
+                        return;
+                    }
+                }
+                catch (Exception onErrorEx) when (!onErrorEx.IsCausedBy(messageProcessingCancellationToken))
+                {
+                    criticalErrorAction($"Failed to execute recoverability policy for message with native ID: `{messageId}`", onErrorEx, messageProcessingCancellationToken);
+                    consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag);
+
+                    return;
+                }
+            }
+
+            try
+            {
+                consumer.Model.BasicAckSingle(message.DeliveryTag);
+            }
+            catch (AlreadyClosedException ex)
+            {
+                failedBasicAckMessages.AddOrUpdate(messageIdKey, true);
+
+                if (Regex.IsMatch(ex.ShutdownReason.ReplyText, @"PRECONDITION_FAILED - delivery acknowledgement on channel [0-9]+ timed out\. Timeout value used: [0-9]+ ms\. This timeout value can be configured, see consumers doc guide to learn more"))
+                {
+                    Logger.Error($"Failed to acknowledge message '{messageId}' because the handler execution time exceeded the broker delivery acknowledgement timeout. Increase the length of the timeout on the broker. The message was returned to the queue.", ex);
                 }
                 else
                 {
-                    try
-                    {
-                        await consumer.Model.BasicAckSingle(message.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
-                    }
-                    catch (AlreadyClosedException ex)
-                    {
-                        Logger.Warn($"Failed to acknowledge message '{messageId}' because the channel was closed. The message was returned to the queue.", ex);
-                    }
+                    Logger.Warn($"Failed to acknowledge message '{messageId}' because the channel was closed. The message was returned to the queue.", ex);
                 }
             }
         }
 
-        async Task MovePoisonMessage(EventingBasicConsumer consumer, BasicDeliverEventArgs message, string queue)
+        static string CreateMessageIdKey(Dictionary<string, string> headers, string messageId)
+        {
+            if (!headers.TryGetValue(NServiceBus.Headers.DelayedRetries, out var delayedRetries))
+            {
+                delayedRetries = "0";
+            }
+
+            return $"{messageId}-{delayedRetries}";
+        }
+
+        int GetDeliveryAttempts(BasicDeliverEventArgs message, string messageIdKey)
+        {
+            var attempts = 1;
+
+            if (!message.Redelivered)
+            {
+                return attempts;
+            }
+
+            if (message.BasicProperties.Headers != null && message.BasicProperties.Headers.TryGetValue("x-delivery-count", out var headerValue))
+            {
+                attempts = Convert.ToInt32(headerValue) + 1;
+            }
+            else
+            {
+
+                attempts = deliveryAttempts.GetOrAdd(messageIdKey, k => 1);
+                attempts++;
+                deliveryAttempts.AddOrUpdate(messageIdKey, attempts);
+            }
+
+            return attempts;
+        }
+
+        async Task MovePoisonMessage(AsyncEventingBasicConsumer consumer, BasicDeliverEventArgs message, string queue, CancellationToken messageProcessingCancellationToken)
         {
             try
             {
@@ -422,24 +487,24 @@
 
                 try
                 {
-                    await channel.RawSendInCaseOfFailure(queue, message.Body, message.BasicProperties).ConfigureAwait(false);
+                    await channel.RawSendInCaseOfFailure(queue, message.Body, message.BasicProperties, messageProcessingCancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
                     channelProvider.ReturnPublishChannel(channel);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!ex.IsCausedBy(messageProcessingCancellationToken))
             {
                 Logger.Error($"Failed to move poison message to queue '{queue}'. Returning message to original queue...", ex);
-                await consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
+                consumer.Model.BasicRejectAndRequeueIfOpen(message.DeliveryTag);
 
                 return;
             }
 
             try
             {
-                await consumer.Model.BasicAckSingle(message.DeliveryTag, exclusiveScheduler).ConfigureAwait(false);
+                consumer.Model.BasicAckSingle(message.DeliveryTag);
             }
             catch (AlreadyClosedException ex)
             {
@@ -449,10 +514,21 @@
 
         public void Dispose()
         {
+            if (disposed)
+            {
+                return;
+            }
+
             circuitBreaker?.Dispose();
-            semaphore?.Dispose();
-            messageProcessing?.Dispose();
+            messagePumpCancellationTokenSource?.Cancel();
+            messagePumpCancellationTokenSource?.Dispose();
+            // This makes sure that if the stop token hasn't been canceled the processing source is canceled
+            // so that any possible reconnect attempt has the possibility to gracefully stop too.
+            messageProcessingCancellationTokenSource?.Cancel();
+            messageProcessingCancellationTokenSource?.Dispose();
+
             connection?.Dispose();
+            disposed = true;
         }
     }
 }

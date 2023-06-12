@@ -1,157 +1,86 @@
 ﻿namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
-    using System.Collections.Generic;
-    using System.Security.Cryptography.X509Certificates;
+    using System.Linq;
     using System.Text;
+    using System.Threading;
     using System.Threading.Tasks;
-    using DelayedDelivery;
-    using global::RabbitMQ.Client.Events;
-    using Performance.TimeToBeReceived;
-    using Routing;
-    using Settings;
 
     sealed class RabbitMQTransportInfrastructure : TransportInfrastructure
     {
-        const string coreHostInformationDisplayNameKey = "NServiceBus.HostInformation.DisplayName";
-
-        readonly SettingsHolder settings;
-        readonly TimeSpan networkRetryDelay;
         readonly ConnectionFactory connectionFactory;
-        readonly IRoutingTopology routingTopology;
         readonly ChannelProvider channelProvider;
+        readonly IRoutingTopology routingTopology;
+        readonly TimeSpan networkRecoveryInterval;
 
-        public RabbitMQTransportInfrastructure(SettingsHolder settings, string connectionString)
+        public RabbitMQTransportInfrastructure(HostSettings hostSettings, ReceiveSettings[] receiverSettings, ConnectionFactory connectionFactory, IRoutingTopology routingTopology,
+            ChannelProvider channelProvider, MessageConverter messageConverter,
+            TimeSpan timeToWaitBeforeTriggeringCircuitBreaker, PrefetchCountCalculation prefetchCountCalculation, TimeSpan networkRecoveryInterval)
         {
-            this.settings = settings;
+            this.connectionFactory = connectionFactory;
+            this.routingTopology = routingTopology;
+            this.channelProvider = channelProvider;
+            this.networkRecoveryInterval = networkRecoveryInterval;
 
-            var endpointName = settings.EndpointName();
-            var connectionConfiguration = ConnectionConfiguration.Create(connectionString);
-
-            settings.TryGet(SettingsKeys.ClientCertificateCollection, out X509Certificate2Collection clientCertificateCollection);
-            settings.TryGet(SettingsKeys.DisableRemoteCertificateValidation, out bool disableRemoteCertificateValidation);
-            settings.TryGet(SettingsKeys.UseExternalAuthMechanism, out bool useExternalAuthMechanism);
-            settings.TryGet(SettingsKeys.HeartbeatInterval, out TimeSpan? heartbeatInterval);
-            settings.TryGet(SettingsKeys.NetworkRecoveryInterval, out TimeSpan? networkRecoveryInterval);
-            networkRetryDelay = networkRecoveryInterval ?? connectionConfiguration.RetryDelay;
-
-            connectionFactory = new ConnectionFactory(endpointName, connectionConfiguration, clientCertificateCollection, disableRemoteCertificateValidation, useExternalAuthMechanism, heartbeatInterval, networkRecoveryInterval);
-
-            routingTopology = CreateRoutingTopology();
-
-            channelProvider = new ChannelProvider(connectionFactory, networkRetryDelay, routingTopology);
+            Dispatcher = new MessageDispatcher(channelProvider);
+            Receivers = receiverSettings.Select(x => CreateMessagePump(hostSettings, x, messageConverter, timeToWaitBeforeTriggeringCircuitBreaker, prefetchCountCalculation))
+                .ToDictionary(x => x.Id, x => x);
         }
 
-        public override IEnumerable<Type> DeliveryConstraints => new List<Type> { typeof(DiscardIfNotReceivedBefore), typeof(NonDurableDelivery), typeof(DoNotDeliverBefore), typeof(DelayDeliveryWith) };
-
-        public override OutboundRoutingPolicy OutboundRoutingPolicy => new OutboundRoutingPolicy(OutboundRoutingType.Unicast, OutboundRoutingType.Multicast, OutboundRoutingType.Unicast);
-
-        public override TransportTransactionMode TransactionMode => TransportTransactionMode.ReceiveOnly;
-
-        public override EndpointInstance BindToLocalEndpoint(EndpointInstance instance) => instance;
-
-        public override TransportReceiveInfrastructure ConfigureReceiveInfrastructure()
+        IMessageReceiver CreateMessagePump(HostSettings hostSettings, ReceiveSettings settings, MessageConverter messageConverter, TimeSpan timeToWaitBeforeTriggeringCircuitBreaker, PrefetchCountCalculation prefetchCountCalculation)
         {
-            return new TransportReceiveInfrastructure(
-                    () => CreateMessagePump(),
-                    () => new QueueCreator(connectionFactory, routingTopology),
-                    () => Task.FromResult(StartupCheckResult.Success));
+            var consumerTag = $"{hostSettings.HostDisplayName} - {hostSettings.Name}";
+            var receiveAddress = ToTransportAddress(settings.ReceiveAddress);
+            return new MessagePump(settings, connectionFactory, routingTopology, messageConverter, consumerTag, channelProvider, timeToWaitBeforeTriggeringCircuitBreaker, prefetchCountCalculation, hostSettings.CriticalErrorAction, networkRecoveryInterval);
         }
 
-        public override TransportSendInfrastructure ConfigureSendInfrastructure()
+        internal void SetupInfrastructure(string[] sendingQueues)
         {
-            return new TransportSendInfrastructure(
-                () => new MessageDispatcher(channelProvider),
-                () => Task.FromResult(DelayInfrastructure.CheckForInvalidSettings(settings)));
-        }
+            using var connection = connectionFactory.CreateAdministrationConnection();
 
-        public override TransportSubscriptionInfrastructure ConfigureSubscriptionInfrastructure()
-        {
-            return new TransportSubscriptionInfrastructure(() => new SubscriptionManager(connectionFactory, routingTopology, settings.LocalAddress()));
-        }
+            connection.VerifyBrokerRequirements();
 
-        public override string ToTransportAddress(LogicalAddress logicalAddress)
-        {
-            var queue = new StringBuilder(logicalAddress.EndpointInstance.Endpoint);
+            using var channel = connection.CreateModel();
 
-            if (logicalAddress.EndpointInstance.Discriminator != null)
+            DelayInfrastructure.Build(channel);
+
+            var receivingQueues = Receivers.Select(r => r.Value.ReceiveAddress).ToArray();
+
+            routingTopology.Initialize(channel, receivingQueues, sendingQueues);
+
+            foreach (string receivingAddress in receivingQueues)
             {
-                queue.Append("-" + logicalAddress.EndpointInstance.Discriminator);
+                routingTopology.BindToDelayInfrastructure(channel, receivingAddress, DelayInfrastructure.DeliveryExchange, DelayInfrastructure.BindingKey(receivingAddress));
+            }
+        }
+
+        public override Task Shutdown(CancellationToken cancellationToken = default)
+        {
+            foreach (IMessageReceiver receiver in Receivers.Values)
+            {
+                ((MessagePump)receiver).Dispose();
             }
 
-            if (logicalAddress.Qualifier != null)
+            channelProvider.Dispose();
+            return Task.CompletedTask;
+        }
+
+        public override string ToTransportAddress(QueueAddress address) => TranslateAddress(address);
+
+        internal static string TranslateAddress(QueueAddress address)
+        {
+            var queue = new StringBuilder(address.BaseAddress);
+            if (address.Discriminator != null)
             {
-                queue.Append("." + logicalAddress.Qualifier);
+                queue.Append("-" + address.Discriminator);
+            }
+
+            if (address.Qualifier != null)
+            {
+                queue.Append("." + address.Qualifier);
             }
 
             return queue.ToString();
-        }
-
-        public override Task Start()
-        {
-            channelProvider.CreateConnection();
-            return base.Start();
-        }
-
-        public override Task Stop()
-        {
-            channelProvider.Dispose();
-            return base.Stop();
-        }
-
-        IRoutingTopology CreateRoutingTopology()
-        {
-            if (!settings.TryGet(out Func<bool, IRoutingTopology> topologyFactory))
-            {
-                throw new InvalidOperationException("A routing topology must be configured with one of the 'EndpointConfiguration.UseTransport<RabbitMQTransport>().UseXXXXRoutingTopology()` methods.");
-            }
-
-            if (!settings.TryGet(SettingsKeys.UseDurableExchangesAndQueues, out bool useDurableExchangesAndQueues))
-            {
-                useDurableExchangesAndQueues = true;
-            }
-
-            return topologyFactory(useDurableExchangesAndQueues);
-        }
-
-        IPushMessages CreateMessagePump()
-        {
-            MessageConverter messageConverter;
-
-            if (settings.HasSetting(SettingsKeys.CustomMessageIdStrategy))
-            {
-                messageConverter = new MessageConverter(settings.Get<Func<BasicDeliverEventArgs, string>>(SettingsKeys.CustomMessageIdStrategy));
-            }
-            else
-            {
-                messageConverter = new MessageConverter();
-            }
-
-            if (!settings.TryGet(coreHostInformationDisplayNameKey, out string hostDisplayName))
-            {
-                hostDisplayName = Support.RuntimeEnvironment.MachineName;
-            }
-
-            var consumerTag = $"{hostDisplayName} - {settings.EndpointName()}";
-
-            var queuePurger = new QueuePurger(connectionFactory);
-
-            if (!settings.TryGet(SettingsKeys.TimeToWaitBeforeTriggeringCircuitBreaker, out TimeSpan timeToWaitBeforeTriggeringCircuitBreaker))
-            {
-                timeToWaitBeforeTriggeringCircuitBreaker = TimeSpan.FromMinutes(2);
-            }
-
-            if (!settings.TryGet(SettingsKeys.PrefetchMultiplier, out int prefetchMultiplier))
-            {
-                prefetchMultiplier = 3;
-            }
-
-            if (!settings.TryGet(SettingsKeys.PrefetchCount, out ushort prefetchCount))
-            {
-                prefetchCount = 0;
-            }
-
-            return new MessagePump(connectionFactory, messageConverter, consumerTag, channelProvider, queuePurger, timeToWaitBeforeTriggeringCircuitBreaker, prefetchMultiplier, prefetchCount, networkRetryDelay);
         }
     }
 }

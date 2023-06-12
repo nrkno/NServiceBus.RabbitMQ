@@ -3,6 +3,7 @@ namespace NServiceBus.Transport.RabbitMQ
     using System;
     using System.Collections.Concurrent;
     using System.Collections.Generic;
+    using System.Threading;
     using System.Threading.Tasks;
     using global::RabbitMQ.Client;
     using global::RabbitMQ.Client.Events;
@@ -31,9 +32,9 @@ namespace NServiceBus.Transport.RabbitMQ
 
         public bool IsClosed => channel.IsClosed;
 
-        public Task SendMessage(string address, OutgoingMessage message, IBasicProperties properties)
+        public Task SendMessage(string address, OutgoingMessage message, IBasicProperties properties, CancellationToken cancellationToken = default)
         {
-            var task = GetConfirmationTask();
+            var task = GetConfirmationTask(cancellationToken);
             properties.SetConfirmationId(channel.NextPublishSeqNo);
 
             if (properties.Headers.TryGetValue(DelayInfrastructure.DelayHeader, out var delayValue))
@@ -51,9 +52,9 @@ namespace NServiceBus.Transport.RabbitMQ
             return task;
         }
 
-        public Task PublishMessage(Type type, OutgoingMessage message, IBasicProperties properties)
+        public Task PublishMessage(Type type, OutgoingMessage message, IBasicProperties properties, CancellationToken cancellationToken = default)
         {
-            var task = GetConfirmationTask();
+            var task = GetConfirmationTask(cancellationToken);
             properties.SetConfirmationId(channel.NextPublishSeqNo);
 
             routingTopology.Publish(channel, type, message, properties);
@@ -61,14 +62,11 @@ namespace NServiceBus.Transport.RabbitMQ
             return task;
         }
 
-        public Task RawSendInCaseOfFailure(string address, ReadOnlyMemory<byte> body, IBasicProperties properties)
+        public Task RawSendInCaseOfFailure(string address, ReadOnlyMemory<byte> body, IBasicProperties properties, CancellationToken cancellationToken = default)
         {
-            var task = GetConfirmationTask();
+            var task = GetConfirmationTask(cancellationToken);
 
-            if (properties.Headers == null)
-            {
-                properties.Headers = new Dictionary<string, object>();
-            }
+            properties.Headers ??= new Dictionary<string, object>();
 
             properties.SetConfirmationId(channel.NextPublishSeqNo);
 
@@ -77,9 +75,11 @@ namespace NServiceBus.Transport.RabbitMQ
             return task;
         }
 
-        Task GetConfirmationTask()
+#pragma warning disable IDE0060
+        Task GetConfirmationTask(CancellationToken cancellationToken)
+#pragma warning restore IDE0060
         {
-            var tcs = new TaskCompletionSource<bool>();
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var added = messages.TryAdd(channel.NextPublishSeqNo, tcs);
 
             if (!added)
@@ -148,14 +148,15 @@ namespace NServiceBus.Transport.RabbitMQ
                 {
                     SetException(message.Key, $"Channel has been closed: {e}");
                 }
-            } while (!messages.IsEmpty);
+            }
+            while (!messages.IsEmpty);
         }
 
         void SetResult(ulong key)
         {
             if (messages.TryRemove(key, out var tcs))
             {
-                _ = TaskEx.StartNew(tcs, state => ((TaskCompletionSource<bool>)state).SetResult(true));
+                tcs.SetResult(true);
             }
         }
 
@@ -163,7 +164,7 @@ namespace NServiceBus.Transport.RabbitMQ
         {
             if (messages.TryRemove(key, out var tcs))
             {
-                _ = TaskEx.StartNew(tcs, state => ((TaskCompletionSource<bool>)state).SetException(new Exception(exceptionMessage)));
+                tcs.SetException(new Exception(exceptionMessage));
             }
         }
 

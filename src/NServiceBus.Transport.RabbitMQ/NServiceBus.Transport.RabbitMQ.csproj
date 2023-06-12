@@ -1,23 +1,25 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFrameworks>net472;net6.0</TargetFrameworks>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\NServiceBus.snk</AssemblyOriginatorKeyFile>
+    <LangVersion>10.0</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="NServiceBus" Version="[7.7.3, 8.0.0)" />
+    <PackageReference Include="BitFaster.Caching" Version="[2.0.0, 3.0.0)" />
+    <PackageReference Include="NServiceBus" Version="8.0.3" />
     <PackageReference Include="RabbitMQ.Client" Version="[6.4.0, 7.0.0)" />
   </ItemGroup>
-
+  
   <PropertyGroup>
     <PackageId>NServiceBus.RabbitMQ</PackageId>
     <Description>RabbitMQ support for NServiceBus</Description>
   </PropertyGroup>
 
-  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
-    <NoWarn>;NU5125;NU5048</NoWarn>
-  </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="NServiceBus.Transport.RabbitMQ.AcceptanceTests" Key="$(NServiceBusTestsKey)" />
     <InternalsVisibleTo Include="NServiceBus.Transport.RabbitMQ.Tests" Key="$(NServiceBusTestsKey)" />
   </ItemGroup>
 

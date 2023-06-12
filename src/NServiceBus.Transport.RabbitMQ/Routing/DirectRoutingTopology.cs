@@ -1,37 +1,37 @@
-﻿namespace NServiceBus.Transport.RabbitMQ
+﻿#nullable disable
+namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
     using System.Collections.Generic;
     using System.Linq;
     using global::RabbitMQ.Client;
     using NServiceBus.Logging;
+    using Unicast.Messages;
 
-    /// <summary>
-    /// Route using a static routing convention for routing messages from publishers to subscribers using routing keys.
-    /// </summary>
     class DirectRoutingTopology : IRoutingTopology
     {
-        public DirectRoutingTopology(Conventions conventions, bool durable, QueueType queueType)
+        public DirectRoutingTopology(bool durable, QueueType queueType, Func<Type, string> routingKeyConvention = null, Func<string> exchangeNameConvention = null)
         {
-            this.conventions = conventions;
             this.durable = durable;
             this.queueType = queueType;
+            this.routingKeyConvention = routingKeyConvention ?? DefaultRoutingKeyConvention.GenerateRoutingKey;
+            this.exchangeNameConvention = exchangeNameConvention ?? (() => amqpTopicExchange);
         }
 
-        public void SetupSubscription(IModel channel, Type type, string subscriberName)
+        public void SetupSubscription(IModel channel, MessageMetadata type, string subscriberName)
         {
-            CreateExchange(channel, ExchangeName());
-            channel.QueueBind(subscriberName, ExchangeName(), GetRoutingKeyForBinding(type));
+            CreateExchange(channel, exchangeNameConvention());
+            channel.QueueBind(subscriberName, exchangeNameConvention(), GetRoutingKeyForBinding(type.MessageType));
         }
 
-        public void TeardownSubscription(IModel channel, Type type, string subscriberName)
+        public void TeardownSubscription(IModel channel, MessageMetadata type, string subscriberName)
         {
-            channel.QueueUnbind(subscriberName, ExchangeName(), GetRoutingKeyForBinding(type), null);
+            channel.QueueUnbind(subscriberName, exchangeNameConvention(), GetRoutingKeyForBinding(type.MessageType), null);
         }
 
         public void Publish(IModel channel, Type type, OutgoingMessage message, IBasicProperties properties)
         {
-            channel.BasicPublish(ExchangeName(), GetRoutingKeyForPublish(type), false, properties, message.Body);
+            channel.BasicPublish(exchangeNameConvention(), GetRoutingKeyForPublish(type), false, properties, message.Body);
         }
 
         public void Send(IModel channel, string address, OutgoingMessage message, IBasicProperties properties)
@@ -71,11 +71,9 @@
             channel.QueueBind(address, deliveryExchange, routingKey);
         }
 
-        string ExchangeName() => conventions.ExchangeName();
-
         void CreateExchange(IModel channel, string exchangeName)
         {
-            if (exchangeName == AmqpTopicExchange)
+            if (exchangeName == amqpTopicExchange)
             {
                 return;
             }
@@ -84,15 +82,13 @@
             {
                 channel.ExchangeDeclare(exchangeName, ExchangeType.Topic, durable);
             }
-            // ReSharper disable EmptyGeneralCatchClause
             catch (Exception)
-            // ReSharper restore EmptyGeneralCatchClause
             {
-
+                // TODO: Any better way to make this idempotent?
             }
         }
 
-        string GetRoutingKeyForPublish(Type eventType) => conventions.RoutingKey(eventType);
+        string GetRoutingKeyForPublish(Type eventType) => routingKeyConvention(eventType);
 
         string GetRoutingKeyForBinding(Type eventType)
         {
@@ -101,28 +97,16 @@
                 return "#";
             }
 
-            return conventions.RoutingKey(eventType) + ".#";
+            return routingKeyConvention(eventType) + ".#";
         }
 
-        const string AmqpTopicExchange = "amq.topic";
+        const string amqpTopicExchange = "amq.topic";
 
-        readonly Conventions conventions;
         readonly bool durable;
         readonly QueueType queueType;
+        readonly Func<Type, string> routingKeyConvention;
+        readonly Func<string> exchangeNameConvention;
 
         static readonly ILog Logger = LogManager.GetLogger(typeof(DirectRoutingTopology));
-
-        public class Conventions
-        {
-            public Conventions(Func<string> exchangeName, Func<Type, string> routingKey)
-            {
-                ExchangeName = exchangeName;
-                RoutingKey = routingKey;
-            }
-
-            public Func<string> ExchangeName { get; }
-
-            public Func<Type, string> RoutingKey { get; }
-        }
     }
 }

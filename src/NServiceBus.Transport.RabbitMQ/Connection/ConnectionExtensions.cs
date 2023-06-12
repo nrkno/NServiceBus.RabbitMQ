@@ -17,18 +17,17 @@
                 throw new Exception($"An unsupported broker version was detected: {brokerVersion}. The broker must be at least version {minimumBrokerVersion}.");
             }
 
-            using (var channel = connection.CreateModel())
-            {
-                var arguments = new Dictionary<string, object> { { "x-queue-type", "stream" } };
+            using var channel = connection.CreateModel();
 
-                try
-                {
-                    channel.QueueDeclare("nsb.v2.verify-stream-flag-enabled", true, false, false, arguments);
-                }
-                catch (Exception ex) when (ex.Message.Contains("the corresponding feature flag is disabled"))
-                {
-                    throw new Exception("An unsupported broker configuration was detected. The 'stream_queue' feature flag needs to be enabled.");
-                }
+            var arguments = new Dictionary<string, object> { { "x-queue-type", "stream" } };
+
+            try
+            {
+                channel.QueueDeclare("nsb.v2.verify-stream-flag-enabled", true, false, false, arguments);
+            }
+            catch (Exception ex) when (ex.Message.Contains("the corresponding feature flag is disabled"))
+            {
+                throw new Exception("An unsupported broker configuration was detected. The 'stream_queue' feature flag needs to be enabled.");
             }
         }
     }

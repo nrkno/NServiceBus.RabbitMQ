@@ -14,10 +14,6 @@
         const string defaultVirtualHost = "/";
         const string defaultUserName = "guest";
         const string defaultPassword = "guest";
-        const ushort defaultRequestedHeartbeat = 60;
-        static readonly TimeSpan defaultRetryDelay = TimeSpan.FromSeconds(10);
-        const string defaultCertPath = "";
-        const string defaultCertPassphrase = null;
 
         public string Host { get; }
 
@@ -29,15 +25,7 @@
 
         public string Password { get; }
 
-        public TimeSpan RequestedHeartbeat { get; }
-
-        public TimeSpan RetryDelay { get; }
-
         public bool UseTls { get; }
-
-        public string CertPath { get; }
-
-        public string CertPassphrase { get; }
 
         ConnectionConfiguration(
             string host,
@@ -45,22 +33,14 @@
             string virtualHost,
             string userName,
             string password,
-            TimeSpan requestedHeartbeat,
-            TimeSpan retryDelay,
-            bool useTls,
-            string certPath,
-            string certPassphrase)
+            bool useTls)
         {
             Host = host;
             Port = port;
             VirtualHost = virtualHost;
             UserName = userName;
             Password = password;
-            RequestedHeartbeat = requestedHeartbeat;
-            RetryDelay = retryDelay;
             UseTls = useTls;
-            CertPath = certPath;
-            CertPassphrase = certPassphrase;
         }
 
         public static ConnectionConfiguration Create(string connectionString)
@@ -77,27 +57,19 @@
                 dictionary = ParseNServiceBusConnectionString(connectionString, invalidOptionsMessage);
             }
 
-            var host = GetValue(dictionary, "host", default);
+            var host = GetValue(dictionary, "host", string.Empty);
             var useTls = GetValue(dictionary, "useTls", bool.TryParse, defaultUseTls, invalidOptionsMessage);
             var port = GetValue(dictionary, "port", int.TryParse, useTls ? defaultTlsPort : defaultPort, invalidOptionsMessage);
             var virtualHost = GetValue(dictionary, "virtualHost", defaultVirtualHost);
             var userName = GetValue(dictionary, "userName", defaultUserName);
             var password = GetValue(dictionary, "password", defaultPassword);
 
-            var requestedHeartbeatSeconds = GetValue(dictionary, "requestedHeartbeat", ushort.TryParse, defaultRequestedHeartbeat, invalidOptionsMessage);
-            var requestedHeartbeat = TimeSpan.FromSeconds(requestedHeartbeatSeconds);
-
-            var retryDelay = GetValue(dictionary, "retryDelay", TimeSpan.TryParse, defaultRetryDelay, invalidOptionsMessage);
-            var certPath = GetValue(dictionary, "certPath", defaultCertPath);
-            var certPassPhrase = GetValue(dictionary, "certPassphrase", defaultCertPassphrase);
-
             if (invalidOptionsMessage.Length > 0)
             {
                 throw new NotSupportedException(invalidOptionsMessage.ToString().TrimEnd('\r', '\n'));
             }
 
-            return new ConnectionConfiguration(
-                host, port, virtualHost, userName, password, requestedHeartbeat, retryDelay, useTls, certPath, certPassPhrase);
+            return new ConnectionConfiguration(host, port, virtualHost, userName, password, useTls);
         }
 
         static Dictionary<string, string> ParseAmqpConnectionString(string connectionString, StringBuilder invalidOptionsMessage)
@@ -200,7 +172,7 @@
 
                 if (hostsAndPorts.Length > 1)
                 {
-                    invalidOptionsMessage.AppendLine("Multiple hosts are no longer supported. If using RabbitMQ in a cluster, consider using a load balancer to represent the nodes as a single host.");
+                    invalidOptionsMessage.AppendLine("Multiple hosts are no longer supported in the connection string. Use 'EndpointConfiguration.UseTransport<RabbitMQTransport>().AddClusterNode' instead.");
                 }
             }
 
@@ -222,6 +194,26 @@
             if (dictionary.ContainsKey("usepublisherconfirms"))
             {
                 invalidOptionsMessage.AppendLine("The 'UsePublisherConfirms' connection string option has been removed. Consult the documentation for further information.");
+            }
+
+            if (dictionary.ContainsKey("certPath"))
+            {
+                invalidOptionsMessage.AppendLine("The 'certPath' connection string option has been removed. Use 'EndpointConfiguration.UseTransport<RabbitMQTransport>().SetClientCertificate' instead.");
+            }
+
+            if (dictionary.ContainsKey("certPassphrase"))
+            {
+                invalidOptionsMessage.AppendLine("The 'certPassphrase' connection string option has been removed. Use 'EndpointConfiguration.UseTransport<RabbitMQTransport>().SetClientCertificate' instead.");
+            }
+
+            if (dictionary.ContainsKey("requestedHeartbeat"))
+            {
+                invalidOptionsMessage.AppendLine("The 'requestedHeartbeat' connection string option has been removed. Use 'EndpointConfiguration.UseTransport<RabbitMQTransport>().SetHeartbeatInterval' instead.");
+            }
+
+            if (dictionary.ContainsKey("retryDelay"))
+            {
+                invalidOptionsMessage.AppendLine("The 'retryDelay' connection string option has been removed. Use 'EndpointConfiguration.UseTransport<RabbitMQTransport>().SetNetworkRecoveryInterval' instead.");
             }
         }
 

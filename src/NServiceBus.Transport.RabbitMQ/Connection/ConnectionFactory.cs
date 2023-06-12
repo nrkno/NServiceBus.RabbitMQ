@@ -1,13 +1,14 @@
 ﻿namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
+    using System.Collections.Generic;
     using System.Diagnostics;
     using System.IO;
     using System.Net.Security;
-    using System.Security.Authentication;
     using System.Security.Cryptography.X509Certificates;
     using global::RabbitMQ.Client;
     using Logging;
+    using Support;
 
     class ConnectionFactory
     {
@@ -15,9 +16,10 @@
 
         readonly string endpointName;
         readonly global::RabbitMQ.Client.ConnectionFactory connectionFactory;
-        readonly object lockObject = new object();
+        readonly List<AmqpTcpEndpoint> endpoints = new();
+        readonly object lockObject = new();
 
-        public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, TimeSpan? heartbeatInterval, TimeSpan? networkRecoveryInterval)
+        public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, TimeSpan heartbeatInterval, TimeSpan networkRecoveryInterval, List<(string hostName, int port, bool useTls)> additionalClusterNodes)
         {
             if (endpointName is null)
             {
@@ -31,41 +33,16 @@
 
             this.endpointName = endpointName;
 
-            if (connectionConfiguration == null)
-            {
-                throw new ArgumentNullException(nameof(connectionConfiguration));
-            }
-
-            if (connectionConfiguration.Host == null)
-            {
-                throw new ArgumentException("The connectionConfiguration has a null Host.", nameof(connectionConfiguration));
-            }
-
             connectionFactory = new global::RabbitMQ.Client.ConnectionFactory
             {
-                HostName = connectionConfiguration.Host,
-                Port = connectionConfiguration.Port,
                 VirtualHost = connectionConfiguration.VirtualHost,
                 UserName = connectionConfiguration.UserName,
                 Password = connectionConfiguration.Password,
-                RequestedHeartbeat = heartbeatInterval ?? connectionConfiguration.RequestedHeartbeat,
-                NetworkRecoveryInterval = networkRecoveryInterval ?? connectionConfiguration.RetryDelay,
-                UseBackgroundThreadsForIO = true
+                RequestedHeartbeat = heartbeatInterval,
+                NetworkRecoveryInterval = networkRecoveryInterval,
+                UseBackgroundThreadsForIO = true,
+                DispatchConsumersAsync = true,
             };
-
-            connectionFactory.Ssl.ServerName = connectionConfiguration.Host;
-            connectionFactory.Ssl.Certs = clientCertificateCollection;
-            connectionFactory.Ssl.CertPath = connectionConfiguration.CertPath;
-            connectionFactory.Ssl.CertPassphrase = connectionConfiguration.CertPassphrase;
-            connectionFactory.Ssl.Version = SslProtocols.Tls12;
-            connectionFactory.Ssl.Enabled = connectionConfiguration.UseTls;
-
-            if (disableRemoteCertificateValidation)
-            {
-                connectionFactory.Ssl.AcceptablePolicyErrors = SslPolicyErrors.RemoteCertificateChainErrors |
-                                                               SslPolicyErrors.RemoteCertificateNameMismatch |
-                                                               SslPolicyErrors.RemoteCertificateNotAvailable;
-            }
 
             if (useExternalAuthMechanism)
             {
@@ -73,6 +50,39 @@
             }
 
             SetClientProperties(endpointName, connectionConfiguration.UserName);
+
+            var endpoint = CreateAmqpTcpEndpoint(connectionConfiguration.Host, connectionConfiguration.Port, connectionConfiguration.UseTls, clientCertificateCollection, disableRemoteCertificateValidation);
+            endpoints.Add(endpoint);
+
+            if (additionalClusterNodes?.Count > 0)
+            {
+                foreach (var (hostName, port, useTls) in additionalClusterNodes)
+                {
+                    endpoint = CreateAmqpTcpEndpoint(hostName, port, useTls, clientCertificateCollection, disableRemoteCertificateValidation);
+                    endpoints.Add(endpoint);
+                }
+            }
+        }
+
+        static AmqpTcpEndpoint CreateAmqpTcpEndpoint(string hostName, int port, bool useTls, X509Certificate2Collection certificateCollection, bool disableRemoteCertificateValidation)
+        {
+            var sslOption = new SslOption();
+
+            if (useTls)
+            {
+                sslOption.ServerName = hostName;
+                sslOption.Certs = certificateCollection;
+                sslOption.Enabled = useTls;
+
+                if (disableRemoteCertificateValidation)
+                {
+                    sslOption.AcceptablePolicyErrors = SslPolicyErrors.RemoteCertificateChainErrors |
+                                                       SslPolicyErrors.RemoteCertificateNameMismatch |
+                                                       SslPolicyErrors.RemoteCertificateNotAvailable;
+                }
+            }
+
+            return new AmqpTcpEndpoint(hostName, port, sslOption);
         }
 
         void SetClientProperties(string endpointName, string userName)
@@ -82,14 +92,14 @@
             var nsbVersion = FileVersionInfo.GetVersionInfo(typeof(Endpoint).Assembly.Location);
             var nsbFileVersion = $"{nsbVersion.FileMajorPart}.{nsbVersion.FileMinorPart}.{nsbVersion.FileBuildPart}";
 
-            var rabbitMQVersion = FileVersionInfo.GetVersionInfo(typeof(ConnectionConfiguration).Assembly.Location);
+            var rabbitMQVersion = FileVersionInfo.GetVersionInfo(typeof(ConnectionFactory).Assembly.Location);
             var rabbitMQFileVersion = $"{rabbitMQVersion.FileMajorPart}.{rabbitMQVersion.FileMinorPart}.{rabbitMQVersion.FileBuildPart}";
 
             var applicationNameAndPath = Environment.GetCommandLineArgs()[0];
             var applicationName = Path.GetFileName(applicationNameAndPath);
             var applicationPath = Path.GetDirectoryName(applicationNameAndPath);
 
-            var hostname = Environment.MachineName;
+            var hostname = RuntimeEnvironment.MachineName;
 
             connectionFactory.ClientProperties.Add("client_api", "NServiceBus");
             connectionFactory.ClientProperties.Add("nservicebus_version", nsbFileVersion);
@@ -105,14 +115,14 @@
 
         public IConnection CreateAdministrationConnection() => CreateConnection($"{endpointName} Administration", false);
 
-        public IConnection CreateConnection(string connectionName, bool automaticRecoveryEnabled = true)
+        public IConnection CreateConnection(string connectionName, bool automaticRecoveryEnabled = true, int consumerDispatchConcurrency = 1)
         {
             lock (lockObject)
             {
                 connectionFactory.AutomaticRecoveryEnabled = automaticRecoveryEnabled;
-                connectionFactory.ClientProperties["connected"] = DateTime.Now.ToString("G");
+                connectionFactory.ConsumerDispatchConcurrency = consumerDispatchConcurrency;
 
-                var connection = connectionFactory.CreateConnection(connectionName);
+                var connection = connectionFactory.CreateConnection(endpoints, connectionName);
 
                 connection.ConnectionBlocked += (sender, e) => Logger.WarnFormat("'{0}' connection blocked: {1}", connectionName, e.Reason);
                 connection.ConnectionUnblocked += (sender, e) => Logger.WarnFormat("'{0}' connection unblocked}", connectionName);
