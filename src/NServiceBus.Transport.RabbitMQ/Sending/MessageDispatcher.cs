@@ -24,15 +24,14 @@
 
                 var tasks = new List<Task>(unicastTransportOperations.Count + multicastTransportOperations.Count);
 
-                transaction.TryGet(out RabbitMQMessagePriority priority);
                 foreach (var operation in unicastTransportOperations)
                 {
-                    tasks.Add(SendMessage(operation, channel, priority, cancellationToken));
+                    tasks.Add(SendMessage(operation, channel, cancellationToken));
                 }
 
                 foreach (var operation in multicastTransportOperations)
                 {
-                    tasks.Add(PublishMessage(operation, channel, priority, cancellationToken));
+                    tasks.Add(PublishMessage(operation, channel, cancellationToken));
                 }
 
                 channelProvider.ReturnPublishChannel(channel);
@@ -49,29 +48,37 @@
             }
         }
 
-        Task SendMessage(UnicastTransportOperation transportOperation, ConfirmsAwareChannel channel, RabbitMQMessagePriority priority, CancellationToken cancellationToken)
+        Task SendMessage(UnicastTransportOperation transportOperation, ConfirmsAwareChannel channel, CancellationToken cancellationToken)
         {
             var message = transportOperation.Message;
 
-            var properties = channel.CreateBasicProperties();
-            if (priority != null)
+            byte priority = 6;
+            if (transportOperation.Properties.TryGetValue(BridgeTransportOperationPropertyKeys.BridgeRabbitMqPriority, out var priAsString))
             {
-                properties.Priority = priority.Priority;
+                priority = byte.Parse(priAsString);
             }
+
+            var properties = channel.CreateBasicProperties();
+
+            properties.Priority = priority;
             properties.Fill(message, transportOperation.Properties);
 
             return channel.SendMessage(transportOperation.Destination, message, properties, cancellationToken);
         }
 
-        Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel, RabbitMQMessagePriority priority, CancellationToken cancellationToken)
+        Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel, CancellationToken cancellationToken)
         {
             var message = transportOperation.Message;
 
-            var properties = channel.CreateBasicProperties();
-            if (priority != null)
+            byte priority = 6;
+            if (transportOperation.Properties.TryGetValue(BridgeTransportOperationPropertyKeys.BridgeRabbitMqPriority, out var priAsString))
             {
-                properties.Priority = priority.Priority;
+                priority = byte.Parse(priAsString);
             }
+
+            var properties = channel.CreateBasicProperties();
+
+            properties.Priority = priority;
             properties.Fill(message, transportOperation.Properties);
 
             return channel.PublishMessage(transportOperation.MessageType, message, properties, cancellationToken);
