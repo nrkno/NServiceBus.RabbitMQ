@@ -279,11 +279,11 @@
         [PreObsolete("https://github.com/Particular/NServiceBus/issues/6811",
             Message = "Routing topology configuration has been moved to the constructor of the RabbitMQTransport class.",
             Note = "Should not be converted to an ObsoleteEx until API mismatch described in issue is resolved.")]
-        public static TransportExtensions<RabbitMQTransport> UseConventionalRoutingTopology(this TransportExtensions<RabbitMQTransport> transportExtensions, QueueType queueType)
+        public static TransportExtensions<RabbitMQTransport> UseConventionalRoutingTopology(this TransportExtensions<RabbitMQTransport> transportExtensions, QueueType queueType, int maxPriority = 0)
         {
             ArgumentNullException.ThrowIfNull(transportExtensions);
 
-            transportExtensions.Transport.TopologyFactory = durable => new ConventionalRoutingTopology(durable, queueType);
+            transportExtensions.Transport.TopologyFactory = durable => new ConventionalRoutingTopology(durable, queueType, maxPriority);
             return transportExtensions;
         }
 
