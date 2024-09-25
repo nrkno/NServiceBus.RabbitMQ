@@ -92,9 +92,27 @@ namespace NServiceBus.Transport.RabbitMQ
                 {
                     arguments = null;
                 }
-                channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
-                CreateExchange(channel, address);
-                channel.QueueBind(address, address, string.Empty);
+
+                // TODO : Remove when we are completely over on Quorum queueus
+                var quorumAddressesToIgnore = new List<string>{ "Bridge.Errors", "Bridge.Audit"};
+                if (queueType == QueueType.Quorum && quorumAddressesToIgnore.Contains(address, StringComparer.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
+                        CreateExchange(channel, address);
+                        channel.QueueBind(address, address, string.Empty);
+                    }
+                    catch
+                    {
+                    }
+                }
+                else
+                {
+                    channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
+                    CreateExchange(channel, address);
+                    channel.QueueBind(address, address, string.Empty);
+                }
             }
         }
 
