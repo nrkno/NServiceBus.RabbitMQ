@@ -11,13 +11,10 @@ namespace NServiceBus.Transport.RabbitMQ
 
     class ConventionalRoutingTopology : IRoutingTopology
     {
-        readonly int maxPriority;
-
-        public ConventionalRoutingTopology(bool durable, QueueType queueType, int maxPriority = 0)
+        public ConventionalRoutingTopology(bool durable, QueueType queueType)
         {
             this.durable = durable;
             this.queueType = queueType;
-            this.maxPriority = maxPriority;
             exchangeNameConvention = type => type.Namespace + ":" + type.Name;
         }
 
@@ -81,17 +78,8 @@ namespace NServiceBus.Transport.RabbitMQ
                 }
             }
 
-            var receiving = receivingAddresses.ToList();
-            foreach (var address in receiving.Concat(sendingAddresses))
+            foreach (var address in receivingAddresses.Concat(sendingAddresses))
             {
-                if (queueType == QueueType.Classic && maxPriority > 0 && receiving.Contains(address))
-                {
-                    arguments = new Dictionary<string, object> { { "x-max-priority", maxPriority } };
-                }
-                else if (queueType != QueueType.Quorum)
-                {
-                    arguments = null;
-                }
                 channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
                 CreateExchange(channel, address);
                 channel.QueueBind(address, address, string.Empty);

@@ -1,5 +1,6 @@
 ﻿namespace NServiceBus.Transport.RabbitMQ
 {
+    using System;
     using System.Collections.Generic;
     using System.Threading;
     using System.Threading.Tasks;
@@ -7,10 +8,12 @@
     class MessageDispatcher : IMessageDispatcher
     {
         readonly ChannelProvider channelProvider;
+        readonly bool supportsDelayedDelivery;
 
-        public MessageDispatcher(ChannelProvider channelProvider)
+        public MessageDispatcher(ChannelProvider channelProvider, bool supportsDelayedDelivery)
         {
             this.channelProvider = channelProvider;
+            this.supportsDelayedDelivery = supportsDelayedDelivery;
         }
 
         public Task Dispatch(TransportOperations outgoingMessages, TransportTransaction transaction, CancellationToken cancellationToken = default)
@@ -50,16 +53,16 @@
 
         Task SendMessage(UnicastTransportOperation transportOperation, ConfirmsAwareChannel channel, CancellationToken cancellationToken)
         {
-            var message = transportOperation.Message;
+            ThrowIfDelayedDeliveryIsDisabledAndMessageIsDelayed(transportOperation);
 
             byte priority = 6;
             if (transportOperation.Properties.TryGetValue(BridgeTransportOperationPropertyKeys.BridgeRabbitMqPriority, out var priAsString))
             {
                 priority = byte.Parse(priAsString);
             }
+            var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
-
             properties.Priority = priority;
             properties.Fill(message, transportOperation.Properties);
 
@@ -68,21 +71,30 @@
 
         Task PublishMessage(MulticastTransportOperation transportOperation, ConfirmsAwareChannel channel, CancellationToken cancellationToken)
         {
-            var message = transportOperation.Message;
+            ThrowIfDelayedDeliveryIsDisabledAndMessageIsDelayed(transportOperation);
 
             byte priority = 6;
             if (transportOperation.Properties.TryGetValue(BridgeTransportOperationPropertyKeys.BridgeRabbitMqPriority, out var priAsString))
             {
                 priority = byte.Parse(priAsString);
             }
+            var message = transportOperation.Message;
 
             var properties = channel.CreateBasicProperties();
-
             properties.Priority = priority;
             properties.Fill(message, transportOperation.Properties);
 
             return channel.PublishMessage(transportOperation.MessageType, message, properties, cancellationToken);
         }
 
+        void ThrowIfDelayedDeliveryIsDisabledAndMessageIsDelayed(IOutgoingTransportOperation transportOperation)
+        {
+            if (!supportsDelayedDelivery &&
+                (transportOperation.Properties.DelayDeliveryWith != null ||
+                 transportOperation.Properties.DoNotDeliverBefore != null))
+            {
+                throw new Exception("Delayed delivery has been disabled in the transport settings.");
+            }
+        }
     }
 }

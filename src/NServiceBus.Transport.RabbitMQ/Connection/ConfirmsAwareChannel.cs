@@ -75,9 +75,7 @@ namespace NServiceBus.Transport.RabbitMQ
             return task;
         }
 
-#pragma warning disable IDE0060
         Task GetConfirmationTask(CancellationToken cancellationToken)
-#pragma warning restore IDE0060
         {
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var added = messages.TryAdd(channel.NextPublishSeqNo, tcs);

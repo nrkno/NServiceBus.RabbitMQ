@@ -6,7 +6,7 @@
     using System.Linq;
     using System.Text;
 
-    public class ConnectionConfiguration
+    class ConnectionConfiguration
     {
         const bool defaultUseTls = false;
         const int defaultPort = 5672;
