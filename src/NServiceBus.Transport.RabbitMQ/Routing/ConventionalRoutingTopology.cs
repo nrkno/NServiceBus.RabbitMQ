@@ -97,15 +97,7 @@ namespace NServiceBus.Transport.RabbitMQ
                 var quorumAddressesToIgnore = new List<string> { "Bridge.Errors", "Bridge.Audit" };
                 if (queueType == QueueType.Quorum && quorumAddressesToIgnore.Contains(address, StringComparer.OrdinalIgnoreCase))
                 {
-                    try
-                    {
-                        channel.QueueDeclare(address, createDurableQueue, false, false, arguments);
-                        CreateExchange(channel, address);
-                        channel.QueueBind(address, address, string.Empty);
-                    }
-                    catch
-                    {
-                    }
+                    // TODO : Remove when we are completely over on Quorum queueus
                 }
                 else
                 {
