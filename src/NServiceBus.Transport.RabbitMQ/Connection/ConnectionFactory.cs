@@ -10,7 +10,7 @@
     using Logging;
     using Support;
 
-    class ConnectionFactory
+    public class ConnectionFactory
     {
         static readonly ILog Logger = LogManager.GetLogger(typeof(IConnection));
 
