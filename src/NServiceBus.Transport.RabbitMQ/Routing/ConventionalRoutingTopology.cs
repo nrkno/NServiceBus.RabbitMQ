@@ -94,7 +94,7 @@ namespace NServiceBus.Transport.RabbitMQ
                 }
 
                 // TODO : Remove when we are completely over on Quorum queueus
-                var quorumAddressesToIgnore = new List<string>{ "Bridge.Errors", "Bridge.Audit"};
+                var quorumAddressesToIgnore = new List<string> { "Bridge.Errors", "Bridge.Audit" };
                 if (queueType == QueueType.Quorum && quorumAddressesToIgnore.Contains(address, StringComparer.OrdinalIgnoreCase))
                 {
                     try
