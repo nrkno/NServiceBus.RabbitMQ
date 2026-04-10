@@ -17,10 +17,10 @@
     <Description>RabbitMQ support for NServiceBus</Description>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
-    <NoWarn>1701;1702;IDE0032</NoWarn>
+    <NoWarn>1701;1702;IDE0032;IDE0055</NoWarn>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
-    <NoWarn>1701;1702;IDE0032</NoWarn>
+    <NoWarn>1701;1702;IDE0032;IDE0055</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
