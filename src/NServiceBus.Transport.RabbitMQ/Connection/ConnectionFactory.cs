@@ -6,18 +6,19 @@
     using System.IO;
     using System.Net.Security;
     using System.Security.Cryptography.X509Certificates;
+    using System.Threading;
+    using System.Threading.Tasks;
     using global::RabbitMQ.Client;
     using Logging;
     using Support;
 
-    public class ConnectionFactory
+    class ConnectionFactory
     {
         static readonly ILog Logger = LogManager.GetLogger(typeof(IConnection));
 
         readonly string endpointName;
         readonly global::RabbitMQ.Client.ConnectionFactory connectionFactory;
         readonly List<AmqpTcpEndpoint> endpoints = [];
-        readonly object lockObject = new();
 
         public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, TimeSpan heartbeatInterval, TimeSpan networkRecoveryInterval, List<(string hostName, int port, bool useTls)> additionalClusterNodes)
         {
@@ -40,12 +41,12 @@
                 Password = connectionConfiguration.Password,
                 RequestedHeartbeat = heartbeatInterval,
                 NetworkRecoveryInterval = networkRecoveryInterval,
-                DispatchConsumersAsync = true,
+                // What do we do with the consumer dispatch concurrency?
             };
 
             if (useExternalAuthMechanism)
             {
-                connectionFactory.AuthMechanisms = new[] { new ExternalMechanismFactory() };
+                connectionFactory.AuthMechanisms = [new ExternalMechanismFactory()];
             }
 
             SetClientProperties(endpointName, connectionConfiguration.UserName);
@@ -110,34 +111,38 @@
             connectionFactory.ClientProperties.Add("endpoint_name", endpointName);
         }
 
-        public IConnection CreatePublishConnection() => CreateConnection($"{endpointName} Publish", false);
+        public Task<IConnection> CreatePublishConnection(CancellationToken cancellationToken = default) => CreateConnection($"{endpointName} Publish", cancellationToken: cancellationToken);
 
-        public IConnection CreateAdministrationConnection() => CreateConnection($"{endpointName} Administration", false);
+        public Task<IConnection> CreateAdministrationConnection(CancellationToken cancellationToken = default) => CreateConnection($"{endpointName} Administration", cancellationToken: cancellationToken);
 
-        public IConnection CreateConnection(string connectionName, bool automaticRecoveryEnabled = true, int consumerDispatchConcurrency = 1)
+        public async Task<IConnection> CreateConnection(string connectionName, CancellationToken cancellationToken = default)
         {
-            lock (lockObject)
+            var connection = await connectionFactory.CreateConnectionAsync(endpoints, connectionName, cancellationToken).ConfigureAwait(false);
+
+            connection.ConnectionBlockedAsync += (sender, e) =>
             {
-                connectionFactory.AutomaticRecoveryEnabled = automaticRecoveryEnabled;
-                connectionFactory.ConsumerDispatchConcurrency = consumerDispatchConcurrency;
+                Logger.WarnFormat("'{0}' connection blocked: {1}", connectionName, e.Reason);
+                return Task.CompletedTask;
+            };
+            connection.ConnectionUnblockedAsync += (sender, e) =>
+            {
+                Logger.WarnFormat("'{0}' connection unblocked}", connectionName);
+                return Task.CompletedTask;
+            };
 
-                var connection = connectionFactory.CreateConnection(endpoints, connectionName);
-
-                connection.ConnectionBlocked += (sender, e) => Logger.WarnFormat("'{0}' connection blocked: {1}", connectionName, e.Reason);
-                connection.ConnectionUnblocked += (sender, e) => Logger.WarnFormat("'{0}' connection unblocked}", connectionName);
-
-                connection.ConnectionShutdown += (sender, e) =>
+            connection.ConnectionShutdownAsync += (sender, e) =>
+            {
+                if (e.Initiator == ShutdownInitiator.Application && e.ReplyCode == 200)
                 {
-                    if (e.Initiator == ShutdownInitiator.Application && e.ReplyCode == 200)
-                    {
-                        return;
-                    }
+                    return Task.CompletedTask;
+                }
 
-                    Logger.WarnFormat("'{0}' connection shutdown: {1}", connectionName, e);
-                };
+                Logger.WarnFormat("'{0}' connection shutdown: {1}", connectionName, e);
 
-                return connection;
-            }
+                return Task.CompletedTask;
+            };
+
+            return connection;
         }
     }
 }

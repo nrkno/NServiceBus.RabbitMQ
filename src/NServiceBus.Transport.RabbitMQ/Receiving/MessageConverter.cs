@@ -3,7 +3,11 @@
     using System;
     using System.Collections.Generic;
     using System.Text;
+    using global::RabbitMQ.Client;
     using global::RabbitMQ.Client.Events;
+
+    using Headers = Headers;
+
     class MessageConverter
     {
         public MessageConverter(Func<BasicDeliverEventArgs, string> messageIdStrategy)
@@ -36,14 +40,15 @@
                 messageHeaders.Remove(DelayInfrastructure.XFirstDeathExchangeHeader);
                 messageHeaders.Remove(DelayInfrastructure.XFirstDeathQueueHeader);
                 messageHeaders.Remove(DelayInfrastructure.XFirstDeathReasonHeader);
-                messageHeaders.Remove(BasicPropertiesExtensions.ConfirmationIdHeader);
+                messageHeaders.Remove(LegacyConfirmationIdHeader);
+                messageHeaders.Remove(Constants.PublishSequenceNumberHeader);
             }
 
-            // Leaving space for ReplyTo, CorrelationId, DeliveryMode, EnclosedMessageTypes conditionally
+            // Leaving space for ReplyTo, CorrelationId, DeliveryMode, EnclosedMessageTypes, ContentType conditionally
             // added below. This is a bit cumbersome and need to be changed when things are conditionally added below
             // but it prevents the header dictionary from growing and relocating which creates quite a bit of
             // memory allocations and eats up CPU cycles.
-            const int extraCapacity = 4;
+            const int extraCapacity = 5;
             var deserializedHeaders = DeserializeHeaders(messageHeaders, extraCapacity);
 
             if (properties.IsReplyToPresent())
@@ -61,7 +66,7 @@
                 deserializedHeaders[Headers.CorrelationId] = properties.CorrelationId;
             }
 
-            if (properties.IsDeliveryModePresent() && properties.DeliveryMode == 1)
+            if (properties.IsDeliveryModePresent() && properties.DeliveryMode == DeliveryModes.Transient)
             {
                 deserializedHeaders[BasicPropertiesExtensions.UseNonPersistentDeliveryHeader] = bool.TrueString;
             }
@@ -70,6 +75,11 @@
             if (!deserializedHeaders.ContainsKey(Headers.EnclosedMessageTypes) && properties.IsTypePresent())
             {
                 deserializedHeaders[Headers.EnclosedMessageTypes] = properties.Type;
+            }
+
+            if (properties.IsContentTypePresent())
+            {
+                deserializedHeaders[Headers.ContentType] = properties.ContentType;
             }
 
             //These headers need to be removed so that they won't be copied to an outgoing message if this message gets forwarded
@@ -151,7 +161,7 @@
                 return sb.ToString();
             }
 
-            if (value is global::RabbitMQ.Client.AmqpTimestamp timestamp)
+            if (value is AmqpTimestamp timestamp)
             {
                 return DateTimeOffsetHelper.ToWireFormattedString(UnixEpoch.AddSeconds(timestamp.UnixTime));
             }
@@ -162,5 +172,7 @@
         readonly Func<BasicDeliverEventArgs, string> messageIdStrategy;
 
         static readonly DateTimeOffset UnixEpoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public const string LegacyConfirmationIdHeader = "NServiceBus.Transport.RabbitMQ.ConfirmationId";
     }
 }

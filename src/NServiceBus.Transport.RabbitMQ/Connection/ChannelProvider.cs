@@ -3,48 +3,42 @@
 namespace NServiceBus.Transport.RabbitMQ
 {
     using System;
-    using System.Collections.Concurrent;
     using System.Threading;
     using System.Threading.Tasks;
     using global::RabbitMQ.Client;
+    using global::RabbitMQ.Client.Events;
     using Logging;
 
-    class ChannelProvider : IDisposable
+    class ChannelProvider(ConnectionFactory connectionFactory, TimeSpan retryDelay, IRoutingTopology routingTopology)
+        : IAsyncDisposable
     {
-        public ChannelProvider(ConnectionFactory connectionFactory, TimeSpan retryDelay, IRoutingTopology routingTopology)
+        public async Task Initialize(CancellationToken cancellationToken = default) => connection = await CreateConnectionWithShutdownListener(cancellationToken).ConfigureAwait(false);
+
+        async Task<IConnection> CreateConnectionWithShutdownListener(CancellationToken cancellationToken)
         {
-            this.connectionFactory = connectionFactory;
-            this.retryDelay = retryDelay;
-
-            this.routingTopology = routingTopology;
-
-            channels = new ConcurrentQueue<ConfirmsAwareChannel>();
-        }
-
-        public void CreateConnection() => connection = CreateConnectionWithShutdownListener();
-
-        protected virtual IConnection CreatePublishConnection() => connectionFactory.CreatePublishConnection();
-
-        IConnection CreateConnectionWithShutdownListener()
-        {
-            var newConnection = CreatePublishConnection();
-            newConnection.ConnectionShutdown += Connection_ConnectionShutdown;
+            var newConnection = await CreatePublishConnection(cancellationToken).ConfigureAwait(false);
+            newConnection.ConnectionShutdownAsync += Connection_ConnectionShutdown;
             return newConnection;
         }
 
-        void Connection_ConnectionShutdown(object? sender, ShutdownEventArgs e)
+        protected virtual Task<IConnection> CreatePublishConnection(CancellationToken cancellationToken = default) => connectionFactory.CreatePublishConnection(cancellationToken);
+
+#pragma warning disable PS0018
+        Task Connection_ConnectionShutdown(object? sender, ShutdownEventArgs e)
+#pragma warning restore PS0018
         {
             if (e.Initiator == ShutdownInitiator.Application || sender is null)
             {
-                return;
+                return Task.CompletedTask;
             }
 
             var connectionThatWasShutdown = (IConnection)sender;
 
             FireAndForget(cancellationToken => ReconnectSwallowingExceptions(connectionThatWasShutdown.ClientProvidedName, cancellationToken), stoppingTokenSource.Token);
+            return Task.CompletedTask;
         }
 
-        async Task ReconnectSwallowingExceptions(string connectionName, CancellationToken cancellationToken)
+        async Task ReconnectSwallowingExceptions(string? connectionName, CancellationToken cancellationToken)
         {
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -54,9 +48,9 @@ namespace NServiceBus.Transport.RabbitMQ
                 {
                     await DelayReconnect(cancellationToken).ConfigureAwait(false);
 
-                    var newConnection = CreateConnectionWithShutdownListener();
+                    var newConnection = await CreateConnectionWithShutdownListener(cancellationToken).ConfigureAwait(false);
 
-                    // A  race condition is possible where CreatePublishConnection is invoked during Dispose
+                    // A race condition is possible where CreatePublishConnection is invoked during Dispose
                     // where the returned connection isn't disposed so invoking Dispose to be sure
                     if (cancellationToken.IsCancellationRequested)
                     {
@@ -88,57 +82,89 @@ namespace NServiceBus.Transport.RabbitMQ
 
         protected virtual Task DelayReconnect(CancellationToken cancellationToken = default) => Task.Delay(retryDelay, cancellationToken);
 
-        public ConfirmsAwareChannel GetPublishChannel()
+        public async ValueTask<ConfirmsAwareChannel> GetPublishChannel(CancellationToken cancellationToken = default)
         {
-            if (!channels.TryDequeue(out var channel) || channel.IsClosed)
+            if (publishChannel is { IsOpen: true })
             {
-                channel?.Dispose();
-
-                channel = new ConfirmsAwareChannel(connection, routingTopology);
+                return publishChannel;
             }
 
-            return channel;
+            try
+            {
+                await publishChannelSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (publishChannel is { IsOpen: true })
+                {
+                    return publishChannel;
+                }
+
+                var oldChannel = publishChannel;
+                if (oldChannel is not null)
+                {
+                    await oldChannel.DisposeAsync().ConfigureAwait(false);
+                }
+
+                var newChannel = new ConfirmsAwareChannel(connection, routingTopology);
+                await newChannel.Initialize(cancellationToken).ConfigureAwait(false);
+                publishChannel = newChannel;
+                return newChannel;
+            }
+            finally
+            {
+                publishChannelSemaphore.Release();
+            }
         }
 
-        public void ReturnPublishChannel(ConfirmsAwareChannel channel)
+        public async ValueTask ReturnPublishChannel(ConfirmsAwareChannel channel, CancellationToken cancellationToken = default)
         {
             if (channel.IsOpen)
             {
-                channels.Enqueue(channel);
+                return;
             }
-            else
+
+            try
             {
-                channel.Dispose();
+                await publishChannelSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+                if (ReferenceEquals(publishChannel, channel))
+                {
+                    await channel.DisposeAsync().ConfigureAwait(false);
+                    publishChannel = null;
+                }
+            }
+            finally
+            {
+                publishChannelSemaphore.Release();
             }
         }
 
-        public void Dispose()
+#pragma warning disable PS0018
+        public async ValueTask DisposeAsync()
+#pragma warning restore PS0018
         {
             if (disposed)
             {
                 return;
             }
 
-            stoppingTokenSource.Cancel();
+            await stoppingTokenSource.CancelAsync().ConfigureAwait(false);
             stoppingTokenSource.Dispose();
 
             var oldConnection = Interlocked.Exchange(ref connection, null);
             oldConnection?.Dispose();
 
-            foreach (var channel in channels)
+            var oldChannel = Interlocked.Exchange(ref publishChannel, null);
+            if (oldChannel is not null)
             {
-                channel.Dispose();
+                await oldChannel.DisposeAsync().ConfigureAwait(false);
             }
 
             disposed = true;
         }
 
-        readonly ConnectionFactory connectionFactory;
-        readonly TimeSpan retryDelay;
-        readonly IRoutingTopology routingTopology;
-        readonly ConcurrentQueue<ConfirmsAwareChannel> channels;
         readonly CancellationTokenSource stoppingTokenSource = new();
         volatile IConnection? connection;
+        readonly SemaphoreSlim publishChannelSemaphore = new(1, 1);
+        volatile ConfirmsAwareChannel? publishChannel;
         bool disposed;
 
         static readonly ILog Logger = LogManager.GetLogger(typeof(ChannelProvider));
