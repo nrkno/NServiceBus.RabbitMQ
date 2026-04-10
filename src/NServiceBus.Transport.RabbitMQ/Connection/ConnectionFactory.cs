@@ -20,7 +20,7 @@
         readonly global::RabbitMQ.Client.ConnectionFactory connectionFactory;
         readonly List<AmqpTcpEndpoint> endpoints = [];
 
-        public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, TimeSpan heartbeatInterval, TimeSpan networkRecoveryInterval, List<(string hostName, int port, bool useTls)> additionalClusterNodes)
+        public ConnectionFactory(string endpointName, ConnectionConfiguration connectionConfiguration, X509Certificate2Collection? clientCertificateCollection, bool disableRemoteCertificateValidation, bool useExternalAuthMechanism, IReadOnlyList<IAuthMechanismFactory> authMechanisms, TimeSpan heartbeatInterval, TimeSpan networkRecoveryInterval, List<(string hostName, int port, bool useTls)> additionalClusterNodes)
         {
             if (endpointName is null)
             {
@@ -49,6 +49,11 @@
                 connectionFactory.AuthMechanisms = [new ExternalMechanismFactory()];
             }
 
+            if (authMechanisms is { Count: > 0 })
+            {
+                connectionFactory.AuthMechanisms = [.. authMechanisms];
+            }
+
             SetClientProperties(endpointName, connectionConfiguration.UserName);
 
             var endpoint = CreateAmqpTcpEndpoint(connectionConfiguration.Host, connectionConfiguration.Port, connectionConfiguration.UseTls, clientCertificateCollection, disableRemoteCertificateValidation);
@@ -64,7 +69,7 @@
             }
         }
 
-        static AmqpTcpEndpoint CreateAmqpTcpEndpoint(string hostName, int port, bool useTls, X509Certificate2Collection certificateCollection, bool disableRemoteCertificateValidation)
+        static AmqpTcpEndpoint CreateAmqpTcpEndpoint(string hostName, int port, bool useTls, X509Certificate2Collection? certificateCollection, bool disableRemoteCertificateValidation)
         {
             var sslOption = new SslOption();
 

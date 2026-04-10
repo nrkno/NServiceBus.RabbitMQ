@@ -17,12 +17,6 @@
     /// </summary>
     public class RabbitMQTransport : TransportDefinition
     {
-        TimeSpan heartbeatInterval = TimeSpan.FromSeconds(60);
-        TimeSpan networkRecoveryInterval = TimeSpan.FromSeconds(10);
-        Func<BasicDeliverEventArgs, string> messageIdStrategy = MessageConverter.DefaultMessageIdStrategy;
-        PrefetchCountCalculation prefetchCountCalculation = maxConcurrency => 3 * maxConcurrency;
-        TimeSpan timeToWaitBeforeTriggeringCircuitBreaker = TimeSpan.FromMinutes(2);
-
         readonly List<(string hostName, int port, bool useTls)> additionalClusterNodes = [];
 
         /// <summary>
@@ -62,9 +56,9 @@
             ConnectionConfiguration = ConnectionConfiguration.Create(connectionString);
         }
 
-        internal ConnectionConfiguration ConnectionConfiguration { get; set; }
+        internal ConnectionConfiguration? ConnectionConfiguration { get; set; }
 
-        internal IRoutingTopology RoutingTopology { get; set; }
+        internal IRoutingTopology? RoutingTopology { get; set; }
 
         /// <summary>
         /// The strategy for deriving the message ID from the raw RabbitMQ message. Override in case of native integration when
@@ -72,26 +66,26 @@
         /// </summary>
         public Func<BasicDeliverEventArgs, string> MessageIdStrategy
         {
-            get => messageIdStrategy;
+            get;
             set
             {
-                ArgumentNullException.ThrowIfNull(value);
-                messageIdStrategy = value;
+                ArgumentNullException.ThrowIfNull(value, nameof(MessageIdStrategy));
+                field = value;
             }
-        }
+        } = MessageConverter.DefaultMessageIdStrategy;
 
         /// <summary>
         /// The time to wait before executing the critical error action when the endpoint cannot communicate with the broker.
         /// </summary>
         public TimeSpan TimeToWaitBeforeTriggeringCircuitBreaker
         {
-            get => timeToWaitBeforeTriggeringCircuitBreaker;
+            get;
             set
             {
-                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
-                timeToWaitBeforeTriggeringCircuitBreaker = value;
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero, nameof(TimeToWaitBeforeTriggeringCircuitBreaker));
+                field = value;
             }
-        }
+        } = TimeSpan.FromMinutes(2);
 
         /// <summary>
         /// Gets or sets the action that allows customization of the native <see cref="BasicProperties"/>
@@ -107,25 +101,25 @@
         /// with expectations elsewhere in the system.
         /// </para>
         /// </remarks>
-        public Action<IOutgoingTransportOperation, IBasicProperties> OutgoingNativeMessageCustomization { get; set; }
+        public Action<IOutgoingTransportOperation, IBasicProperties>? OutgoingNativeMessageCustomization { get; set; }
 
         /// <summary>
         /// The calculation method for the prefetch count. The default is 3 times the maximum concurrency value.
         /// </summary>
         public PrefetchCountCalculation PrefetchCountCalculation
         {
-            get => prefetchCountCalculation;
+            get;
             set
             {
-                ArgumentNullException.ThrowIfNull(value);
-                prefetchCountCalculation = value;
+                ArgumentNullException.ThrowIfNull(value, nameof(PrefetchCountCalculation));
+                field = value;
             }
-        }
+        } = maxConcurrency => 3 * maxConcurrency;
 
         /// <summary>
         /// The certificate to use for client authentication when connecting to the broker via TLS.
         /// </summary>
-        public X509Certificate2 ClientCertificate { get; set; }
+        public X509Certificate2? ClientCertificate { get; set; }
 
         /// <summary>
         /// Should the client validate the broker certificate when connecting via TLS.
@@ -135,7 +129,28 @@
         /// <summary>
         /// Specifies if an external authentication mechanism should be used for client authentication.
         /// </summary>
+        [Obsolete("Use 'AuthMechanisms = [new ExternalMechanismFactory()]' to configure an external authentication mechanism instead. Will be treated as an error from version 12.0.0. Will be removed in version 13.0.0.", false)]
         public bool UseExternalAuthMechanism { get; set; } = false;
+
+        /// <summary>
+        /// The authentication mechanisms that should be used for client authentication. Overrides the default mechanisms.
+        /// </summary>
+        /// <example>
+        /// To use an external authentication mechanism:
+        /// <code>
+        /// AuthMechanisms = [new ExternalMechanismFactory()];
+        /// </code>
+        /// </example>
+        /// <seealso cref="ExternalMechanismFactory"/>
+        public IReadOnlyList<IAuthMechanismFactory> AuthMechanisms
+        {
+            get;
+            set
+            {
+                ArgumentNullException.ThrowIfNull(value, nameof(AuthMechanisms));
+                field = value;
+            }
+        } = [];
 
         /// <summary>
         /// Should the transport validate that queue delivery limits are configured properly to avoid interfering with message recoverability.
@@ -147,12 +162,12 @@
         /// <summary>
         /// The RabbitMQ management API configuration to use instead of inferring values from the connection string.
         /// </summary>
-        public ManagementApiConfiguration ManagementApiConfiguration { get; set; }
+        public ManagementApiConfiguration? ManagementApiConfiguration { get; set; }
 
         /// <summary>
         /// The broker requirement checks to disable.
         /// <br />
-        /// Using a broker that does not meet all of the requirements can result in message loss or other incorrect operation, so disabling the checks is not recommended.
+        /// Using a broker that does not meet all the requirements can result in message loss or other incorrect operation, so disabling the checks is not recommended.
         /// </summary>
         public BrokerRequirementChecks DisabledBrokerRequirementChecks { get; set; }
 
@@ -161,26 +176,26 @@
         /// </summary>
         public TimeSpan HeartbeatInterval
         {
-            get => heartbeatInterval;
+            get;
             set
             {
-                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
-                heartbeatInterval = value;
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero, nameof(HeartbeatInterval));
+                field = value;
             }
-        }
+        } = TimeSpan.FromSeconds(60);
 
         /// <summary>
         /// The time to wait between attempts to reconnect to the broker if the connection is lost.
         /// </summary>
         public TimeSpan NetworkRecoveryInterval
         {
-            get => networkRecoveryInterval;
+            get;
             set
             {
-                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
-                networkRecoveryInterval = value;
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero, nameof(NetworkRecoveryInterval));
+                field = value;
             }
-        }
+        } = TimeSpan.FromSeconds(10);
 
         /// <summary>
         /// Adds an additional cluster node that the endpoint can use to connect to the broker.
@@ -208,30 +223,35 @@
             additionalClusterNodes.Add((hostName, port, useTls));
         }
 
-        internal ManagementClient ManagementClient { get; private set; }
+        internal ManagementClient? ManagementClient { get; private set; }
 
         /// <inheritdoc />
         public override async Task<TransportInfrastructure> Initialize(HostSettings hostSettings, ReceiveSettings[] receivers, string[] sendingAddresses, CancellationToken cancellationToken = default)
         {
             ValidateAndApplyLegacyConfiguration();
 
-            X509Certificate2Collection certCollection = null;
+            ArgumentNullException.ThrowIfNull(ConnectionConfiguration);
+            ArgumentNullException.ThrowIfNull(RoutingTopology);
+
+            X509Certificate2Collection? certCollection = null;
 
             if (ClientCertificate != null)
             {
                 certCollection = new X509Certificate2Collection(ClientCertificate);
             }
 
+#pragma warning disable CS0618 // Type or member is obsolete
             var connectionFactory = new ConnectionFactory(
                 hostSettings.Name,
                 ConnectionConfiguration,
                 certCollection,
                 !ValidateRemoteCertificate,
                 UseExternalAuthMechanism,
+                AuthMechanisms,
                 HeartbeatInterval,
                 NetworkRecoveryInterval,
-                additionalClusterNodes
-            );
+                additionalClusterNodes);
+#pragma warning restore CS0618 // Type or member is obsolete
 
             ManagementClient = new ManagementClient(ConnectionConfiguration, ManagementApiConfiguration, !ValidateRemoteCertificate);
 
@@ -272,9 +292,9 @@
 
         // Remove all Legacy API stuff below when PreObsoletes are converted
 
-        internal string LegacyApiConnectionString { get; set; }
+        internal string? LegacyApiConnectionString { get; set; }
 
-        internal Func<bool, IRoutingTopology> TopologyFactory { get; set; }
+        internal Func<bool, IRoutingTopology>? TopologyFactory { get; set; }
 
         internal bool UseDurableExchangesAndQueues { get; set; } = true;
 

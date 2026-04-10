@@ -5,12 +5,13 @@
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>..\NServiceBus.snk</AssemblyOriginatorKeyFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="BitFaster.Caching" Version="2.5.3" />
-    <PackageReference Include="NServiceBus" Version="9.2.8" />
-    <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
+    <PackageReference Include="BitFaster.Caching" Version="2.5.4" />
+    <PackageReference Include="NServiceBus" Version="10.1.1" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.2.1" />
   </ItemGroup>
   <PropertyGroup>
     <PackageId>NServiceBus.RabbitMQ</PackageId>
