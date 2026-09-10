@@ -3,6 +3,6 @@
 
     public static class BridgeTransportOperationPropertyKeys
     {
-        public const string BridgeRabbitMqPriority = "Bridge.RabbitMqPriorit";
+        public const string BridgeRabbitMqPriority = "Bridge.RabbitMqPriority";
     }
 }
